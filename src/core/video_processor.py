@@ -777,6 +777,14 @@ class VideoProcessor:
         if len(clip_infos) == 1:
             return clip_infos[0]["clip"]
         
+        # 检查是否使用转场
+        transition_type = self.settings["transition"]
+        if transition_type == "不使用转场":
+            # 直接拼接所有片段，不应用任何转场效果
+            logger.info("使用快速模式：不应用转场效果")
+            clips = [info["clip"] for info in clip_infos]
+            return concatenate_videoclips(clips)
+        
         # 准备要合并的片段
         merged_clips = []
         
@@ -789,8 +797,7 @@ class VideoProcessor:
             curr_clip = clip_infos[i]["clip"]
             
             # 获取转场类型
-            transition_type = self.settings["transition"]
-            if transition_type == "random":
+            if transition_type == "随机转场":
                 # 随机选择转场效果
                 transition_types = ["fade", "mirror_flip", "hue_shift", "zoom", "wipe", "pixelate", "slide", "blur"]
                 transition_type = random.choice(transition_types)

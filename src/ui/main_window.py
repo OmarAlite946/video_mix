@@ -98,13 +98,10 @@ class MainWindow(QMainWindow):
         
         # 合成模式选择
         mode_layout = QHBoxLayout()
-        self.combo_text_mode = QComboBox()
-        self.combo_text_mode.addItems(["文字模式"])
         self.combo_audio_mode = QComboBox()
         self.combo_audio_mode.addItems(["配音模式"])
         
         mode_layout.addWidget(QLabel("合成模式:"))
-        mode_layout.addWidget(self.combo_text_mode)
         mode_layout.addWidget(self.combo_audio_mode)
         mode_layout.addStretch()
         
@@ -204,7 +201,7 @@ class MainWindow(QMainWindow):
         transition_layout = QHBoxLayout()
         self.combo_transition = QComboBox()
         self.combo_transition.addItems([
-            "随机转场", "镜像翻转", "色相偏移", "光束扫描", 
+            "不使用转场", "随机转场", "镜像翻转", "色相偏移", "光束扫描", 
             "像素化过渡", "轻微旋转缩放", "倒放闪回", "速度波动过渡", "分屏滑动"
         ])
         
@@ -612,7 +609,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
     def _get_compose_params(self):
         """获取当前合成参数"""
         params = {
-            "text_mode": self.combo_text_mode.currentText(),
+            "text_mode": self.combo_audio_mode.currentText(),
             "audio_mode": self.combo_audio_mode.currentText(),
             "video_mode": self.combo_video_mode.currentText(),
             "resolution": self.combo_resolution.currentText(),
