@@ -7,6 +7,7 @@
 
 import sys
 import os
+import json
 import traceback
 import argparse
 from pathlib import Path
@@ -49,6 +50,108 @@ def configure_ffmpeg():
         print(f"保存路径时出错: {str(e)}")
         return False
 
+def display_gpu_info():
+    """显示GPU详细信息"""
+    try:
+        from hardware.system_analyzer import SystemAnalyzer
+        
+        print("=== GPU详细信息检测 ===")
+        print("正在检测系统GPU信息...")
+        
+        analyzer = SystemAnalyzer()
+        system_info = analyzer.analyze()
+        gpu_info = system_info.get('gpu', {})
+        
+        if not gpu_info.get('available', False):
+            print("\n未检测到可用的GPU设备")
+            return False
+        
+        print("\n== 基本GPU信息 ==")
+        print(f"检测到GPU: {gpu_info.get('count', 0)}个")
+        
+        # 显示所有GPU信息
+        for i, gpu in enumerate(gpu_info.get('gpus', [])):
+            print(f"\nGPU {i+1}: {gpu.get('name', '未知')}")
+            print(f"  厂商: {gpu.get('vendor', '未知')}")
+            print(f"  类型: {gpu.get('type', '未知')}")
+            
+            if 'memory_total_mb' in gpu:
+                print(f"  显存: {gpu.get('memory_total_mb', 0):.0f} MB")
+            
+            if 'driver_version' in gpu:
+                print(f"  驱动版本: {gpu.get('driver_version', '未知')}")
+            
+            # 显示GPU能力
+            capabilities = gpu.get('capabilities', {})
+            if capabilities:
+                print("  硬件能力:")
+                print(f"    硬件编码: {'支持' if capabilities.get('hardware_encoding', False) else '不支持'}")
+                print(f"    硬件解码: {'支持' if capabilities.get('hardware_decoding', False) else '不支持'}")
+                
+                codecs = capabilities.get('supported_codecs', [])
+                if codecs:
+                    print(f"    支持编解码器: {', '.join(codecs)}")
+        
+        # 显示加速器信息
+        print("\n== 加速器信息 ==")
+        accelerators = gpu_info.get('accelerators', {})
+        
+        # CUDA信息
+        cuda_info = accelerators.get('cuda', {})
+        print("CUDA支持: " + ("是" if cuda_info.get('available', False) else "否"))
+        if cuda_info.get('available', False):
+            print(f"  CUDA版本: {cuda_info.get('version_string', '未知')}")
+            if 'device_count' in cuda_info:
+                print(f"  CUDA设备数: {cuda_info.get('device_count', 0)}")
+        
+        # OpenCL信息
+        opencl_info = accelerators.get('opencl', {})
+        print("OpenCL支持: " + ("是" if opencl_info.get('available', False) else "否"))
+        if opencl_info.get('available', False) and 'platforms' in opencl_info:
+            for i, platform in enumerate(opencl_info.get('platforms', [])):
+                print(f"  平台 {i+1}: {platform.get('name', '未知')} ({platform.get('vendor', '未知')})")
+                print(f"    版本: {platform.get('version', '未知')}")
+                print(f"    设备数: {len(platform.get('devices', []))}")
+        
+        # DirectX信息 (仅Windows)
+        if 'directx' in accelerators:
+            directx_info = accelerators.get('directx', {})
+            print("DirectX支持: " + ("是" if directx_info.get('available', False) else "否"))
+            if directx_info.get('available', False):
+                print(f"  DirectX版本: {directx_info.get('version', '未知')}")
+        
+        # FFmpeg兼容性
+        print("\n== FFmpeg硬件加速兼容性 ==")
+        ffmpeg_compat = gpu_info.get('ffmpeg_compatibility', {})
+        
+        if 'error' in ffmpeg_compat:
+            print(f"兼容性检测错误: {ffmpeg_compat.get('error', '')}")
+        else:
+            print("支持硬件加速: " + ("是" if ffmpeg_compat.get('hardware_acceleration', False) else "否"))
+            
+            encoders = ffmpeg_compat.get('recommended_encoders', [])
+            if encoders:
+                print(f"推荐编码器: {', '.join(encoders)}")
+            
+            decoders = ffmpeg_compat.get('recommended_decoders', [])
+            if decoders:
+                print(f"推荐解码器: {', '.join(decoders)}")
+        
+        # 导出JSON文件
+        try:
+            with open("gpu_info.json", "w", encoding="utf-8") as f:
+                json.dump(gpu_info, f, ensure_ascii=False, indent=2)
+            print(f"\nGPU信息已导出到: {os.path.abspath('gpu_info.json')}")
+        except Exception as e:
+            print(f"导出信息时出错: {str(e)}")
+        
+        return True
+    
+    except Exception as e:
+        print(f"检测GPU信息时出错: {str(e)}")
+        traceback.print_exc()
+        return False
+
 def handle_exception(exc_type, exc_value, exc_traceback):
     """全局异常处理"""
     if issubclass(exc_type, KeyboardInterrupt):
@@ -68,6 +171,8 @@ def main():
     """程序主入口"""
     parser = argparse.ArgumentParser(description="短视频批量混剪工具")
     parser.add_argument("--config-ffmpeg", action="store_true", help="配置FFmpeg路径后退出")
+    parser.add_argument("--gpu-info", action="store_true", help="显示详细GPU信息后退出")
+    parser.add_argument("--reset-gpu-config", action="store_true", help="重置GPU配置后退出")
     args = parser.parse_args()
     
     # 如果指定了配置FFmpeg，则运行配置工具后退出
@@ -75,29 +180,86 @@ def main():
         success = configure_ffmpeg()
         return 0 if success else 1
     
+    # 如果指定了显示GPU信息，则运行GPU检测工具后退出
+    if args.gpu_info:
+        success = display_gpu_info()
+        return 0 if success else 1
+    
     try:
         from PyQt5.QtWidgets import QApplication
         from ui.main_window import MainWindow
         from utils.logger import setup_logger
         from hardware.system_analyzer import SystemAnalyzer
+        from hardware.gpu_config import GPUConfig
     except ImportError as e:
         print(f"导入错误: {e}")
         print("请确保已安装所有依赖: pip install -r requirements.txt")
         sys.exit(1)
     
+    # 设置日志
+    setup_logger()
+    
+    # 如果指定了重置GPU配置，则进行重置后退出
+    if args.reset_gpu_config:
+        print("正在重置GPU配置...")
+        gpu_config = GPUConfig()
+        gpu_config._set_cpu_config()
+        print("GPU配置已重置为CPU模式")
+        return 0
+    
     app = QApplication(sys.argv)
     app.setApplicationName("视频混剪工具")
     app.setOrganizationName("VideoMixTool")
     
-    # 设置日志
-    setup_logger()
-    
     # 检测系统硬件
     analyzer = SystemAnalyzer()
     system_info = analyzer.analyze()
+    
+    # 简单显示系统信息
     print("系统信息:")
-    for key, value in system_info.items():
-        print(f"  {key}: {value}")
+    print(f"  操作系统: {system_info.get('os', '未知')} {system_info.get('os_version', '未知')}")
+    print(f"  CPU: {system_info.get('cpu', {}).get('model', '未知')}")
+    print(f"  内存: {system_info.get('memory', {}).get('total_gb', 0):.1f} GB")
+    
+    # 显示GPU信息
+    gpu_info = system_info.get('gpu', {})
+    if gpu_info.get('available', False):
+        primary_gpu = gpu_info.get('primary_gpu', '未知')
+        primary_vendor = gpu_info.get('primary_vendor', '未知')
+        print(f"  GPU: {primary_gpu} ({primary_vendor})")
+        
+        # 显示硬件加速信息
+        ffmpeg_compat = gpu_info.get('ffmpeg_compatibility', {})
+        if ffmpeg_compat.get('hardware_acceleration', False):
+            encoders = ffmpeg_compat.get('recommended_encoders', [])
+            if encoders:
+                print(f"  可用硬件加速编码器: {', '.join(encoders)}")
+        
+        print("\n若要查看完整GPU信息，请使用参数：--gpu-info")
+    else:
+        print("  未检测到可用的GPU")
+    
+    # 初始化GPU配置
+    gpu_config = GPUConfig()
+    if gpu_config.is_hardware_acceleration_enabled():
+        gpu_name, gpu_vendor = gpu_config.get_gpu_info()
+        encoder = gpu_config.get_encoder()
+        print(f"\n已启用GPU硬件加速:")
+        print(f"  硬件: {gpu_name} ({gpu_vendor})")
+        print(f"  编码器: {encoder}")
+    else:
+        # 尝试自动配置GPU
+        if gpu_info.get('available', False):
+            if gpu_config.detect_and_set_optimal_config():
+                gpu_name, gpu_vendor = gpu_config.get_gpu_info()
+                encoder = gpu_config.get_encoder()
+                print(f"\n已自动启用GPU硬件加速:")
+                print(f"  硬件: {gpu_name} ({gpu_vendor})")
+                print(f"  编码器: {encoder}")
+            else:
+                print("\n自动配置GPU硬件加速失败，将使用CPU编码")
+        else:
+            print("\n未检测到可用的GPU，将使用CPU编码")
     
     # 创建并显示主窗口
     window = MainWindow()

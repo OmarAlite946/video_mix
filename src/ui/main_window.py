@@ -8,18 +8,26 @@
 import os
 import sys
 import subprocess
+import logging
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QComboBox, QSpinBox, QLineEdit, 
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, 
     QMessageBox, QGroupBox, QFormLayout, QDoubleSpinBox, QCheckBox,
-    QProgressBar
+    QProgressBar, QStatusBar, QApplication
 )
 from PyQt5 import QtCore
 from PyQt5.QtCore import Qt, QSize, pyqtSlot
 from PyQt5.QtGui import QIcon, QFont
 from utils.file_utils import list_media_files
+
+# 导入GPU检测和配置模块
+from hardware.system_analyzer import SystemAnalyzer
+from hardware.gpu_config import GPUConfig
+
+# 设置日志
+logger = logging.getLogger(__name__)
 
 class MainWindow(QMainWindow):
     """应用程序主窗口"""
@@ -33,6 +41,10 @@ class MainWindow(QMainWindow):
         self.processor = None
         self.processing_thread = None
         
+        # 初始化GPU配置
+        self.gpu_config = GPUConfig()
+        self.gpu_info = {}  # 存储GPU信息
+        
         # 初始化界面
         self._init_ui()
         
@@ -41,6 +53,12 @@ class MainWindow(QMainWindow):
         
         # 连接信号槽
         self._connect_signals()
+        
+        # 初始化状态栏
+        self._init_statusbar()
+        
+        # 检测GPU（软件启动时自动检测一次）
+        self.detect_gpu()
     
     def _init_ui(self):
         """初始化UI界面"""
@@ -141,10 +159,15 @@ class MainWindow(QMainWindow):
         # GPU加速
         gpu_layout = QHBoxLayout()
         self.combo_gpu = QComboBox()
-        self.combo_gpu.addItems(["Nvidia显卡", "AMD显卡", "Intel显卡", "CPU处理"])
+        self.combo_gpu.addItems(["自动检测", "Nvidia显卡", "AMD显卡", "Intel显卡", "CPU处理"])
+        
+        # 添加GPU检测按钮
+        self.btn_detect_gpu = QPushButton("检测显卡")
+        self.btn_detect_gpu.setToolTip("检测系统GPU并自动配置硬件加速")
         
         gpu_layout.addWidget(QLabel("显卡加速:"))
         gpu_layout.addWidget(self.combo_gpu)
+        gpu_layout.addWidget(self.btn_detect_gpu)
         gpu_layout.addStretch()
         
         settings_layout.addRow(gpu_layout)
@@ -276,6 +299,15 @@ class MainWindow(QMainWindow):
         exit_action = file_menu.addAction("退出")
         exit_action.triggered.connect(self.close)
         
+        # 工具菜单
+        tools_menu = menubar.addMenu("工具")
+        
+        gpu_test_action = tools_menu.addAction("GPU加速测试")
+        gpu_test_action.triggered.connect(self.run_gpu_test)
+        
+        gpu_status_action = tools_menu.addAction("显示GPU状态")
+        gpu_status_action.triggered.connect(self.show_gpu_status)
+        
         # 帮助菜单
         help_menu = menubar.addMenu("帮助")
         
@@ -361,6 +393,9 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 背景音乐
         self.btn_browse_bgm.clicked.connect(self.on_browse_bgm)
         self.btn_play_bgm.clicked.connect(self.on_play_bgm)
+        
+        # GPU检测
+        self.btn_detect_gpu.clicked.connect(self.detect_gpu)
         
         # 合成控制
         self.btn_start_compose.clicked.connect(self.on_start_compose)
@@ -496,6 +531,560 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         self.label_progress.setText(message)
         self.progress_bar.setValue(int(percent))
     
+    def detect_gpu(self):
+        """检测GPU并更新UI - 优化版"""
+        # 更新状态栏
+        self.status_label.setText("正在检测显卡...")
+        self.gpu_status_label.setText("GPU: 检测中...")
+        
+        # 禁用检测按钮，防止重复点击
+        self.btn_detect_gpu.setEnabled(False)
+        
+        # 在单独线程中执行GPU检测，避免阻塞UI
+        import threading
+        import time
+        import logging
+        
+        def do_detect_gpu():
+            try:
+                # 记录开始时间
+                start_time = time.time()
+                
+                # 第一阶段：快速检测 - 只检测基本GPU信息，不进行深度检测
+                analyzer = SystemAnalyzer(deep_gpu_detection=False)
+                system_info = analyzer.analyze()
+                self.gpu_info = system_info.get('gpu', {})
+                
+                # 记录基本检测完成时间
+                basic_detection_time = time.time() - start_time
+                logging.info(f"基本GPU检测完成，耗时: {basic_detection_time:.3f} 秒")
+                
+                # 检查是否找到GPU
+                if self.gpu_info.get('available', False):
+                    # 先用基本信息快速更新UI
+                    QtCore.QMetaObject.invokeMethod(
+                        self, 
+                        "_update_basic_gpu_ui", 
+                        QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(bool, True)
+                    )
+                    
+                    # 第二阶段：深度检测 - 检测硬件加速能力和兼容性
+                    # 这个过程较慢，但已经有基本信息显示了
+                    deep_start_time = time.time()
+                    analyzer = SystemAnalyzer(deep_gpu_detection=True)
+                    system_info = analyzer.analyze()
+                    self.gpu_info = system_info.get('gpu', {})
+                    
+                    # 记录深度检测完成时间
+                    deep_detection_time = time.time() - deep_start_time
+                    logging.info(f"深度GPU检测完成，耗时: {deep_detection_time:.3f} 秒")
+                    
+                    # 尝试自动配置GPU
+                    config_start_time = time.time()
+                    gpu_configured = self.gpu_config.detect_and_set_optimal_config()
+                    config_time = time.time() - config_start_time
+                    logging.info(f"GPU配置完成，耗时: {config_time:.3f} 秒")
+                    
+                    # 更新完整UI
+                    QtCore.QMetaObject.invokeMethod(
+                        self, 
+                        "_update_gpu_ui", 
+                        QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(bool, True),
+                        QtCore.Q_ARG(bool, gpu_configured)
+                    )
+                else:
+                    # 没有GPU，直接更新UI
+                    QtCore.QMetaObject.invokeMethod(
+                        self, 
+                        "_update_gpu_ui", 
+                        QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(bool, False),
+                        QtCore.Q_ARG(bool, False)
+                    )
+                
+                # 记录总时间
+                total_time = time.time() - start_time
+                logging.info(f"GPU检测和配置总耗时: {total_time:.3f} 秒")
+            except Exception as e:
+                # 在主线程中显示错误
+                QtCore.QMetaObject.invokeMethod(
+                    self, 
+                    "_show_gpu_detection_error", 
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, str(e))
+                )
+            finally:
+                # 重新启用检测按钮
+                QtCore.QMetaObject.invokeMethod(
+                    self, 
+                    "_enable_gpu_button", 
+                    QtCore.Qt.QueuedConnection
+                )
+        
+        # 启动检测线程
+        detection_thread = threading.Thread(target=do_detect_gpu, daemon=True)
+        detection_thread.start()
+    
+    @QtCore.pyqtSlot(bool)
+    def _update_basic_gpu_ui(self, gpu_available):
+        """快速更新基本GPU信息"""
+        if gpu_available:
+            # 获取基本GPU信息
+            primary_gpu = self.gpu_info.get('primary_gpu', '未知')
+            primary_vendor = self.gpu_info.get('primary_vendor', '未知')
+            
+            # 更新状态栏 - 只显示基本信息
+            self.gpu_status_label.setText(f"GPU: {primary_gpu}")
+            self.status_label.setText("检测到显卡，正在分析硬件加速能力...")
+            
+            # 更新下拉框
+            if 'nvidia' in primary_vendor.lower():
+                self.combo_gpu.setCurrentText("Nvidia显卡")
+            elif 'amd' in primary_vendor.lower():
+                self.combo_gpu.setCurrentText("AMD显卡")
+            elif 'intel' in primary_vendor.lower():
+                self.combo_gpu.setCurrentText("Intel显卡")
+            else:
+                self.combo_gpu.setCurrentText("自动检测")
+        else:
+            # 未检测到GPU
+            self.combo_gpu.setCurrentText("CPU处理")
+            self.gpu_status_label.setText("GPU: 未检测到")
+            self.status_label.setText("未检测到GPU，将使用CPU处理")
+    
+    @QtCore.pyqtSlot()
+    def _enable_gpu_button(self):
+        """重新启用GPU检测按钮"""
+        self.btn_detect_gpu.setEnabled(True)
+    
+    @QtCore.pyqtSlot(str)
+    def _show_gpu_detection_error(self, error):
+        """显示GPU检测错误"""
+        self.status_label.setText("就绪")
+        self.gpu_status_label.setText("GPU: 检测失败")
+        QMessageBox.warning(self, "GPU检测错误", f"检测GPU时发生错误:\n{error}")
+    
+    @QtCore.pyqtSlot(bool, bool)
+    def _update_gpu_ui(self, gpu_available, gpu_configured):
+        """更新GPU相关的UI，针对远程控制环境优化"""
+        if gpu_available:
+            # 获取GPU信息
+            primary_gpu = self.gpu_info.get('primary_gpu', '未知')
+            primary_vendor = self.gpu_info.get('primary_vendor', '未知')
+            
+            # 如果是远程显示驱动，尝试从gpu_config获取正确的信息
+            if 'oray' in primary_vendor.lower() or 'unknown' in primary_vendor.lower() or 'remote' in primary_vendor.lower():
+                gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
+                if gpu_vendor != '未知' and 'NVIDIA' in gpu_vendor:
+                    primary_gpu = gpu_name
+                    primary_vendor = gpu_vendor
+            
+            # 更新下拉框
+            if 'nvidia' in primary_vendor.lower():
+                self.combo_gpu.setCurrentText("Nvidia显卡")
+            elif 'amd' in primary_vendor.lower():
+                self.combo_gpu.setCurrentText("AMD显卡")
+            elif 'intel' in primary_vendor.lower():
+                self.combo_gpu.setCurrentText("Intel显卡")
+            else:
+                self.combo_gpu.setCurrentText("自动检测")
+            
+            # 更新状态栏
+            if gpu_configured:
+                gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
+                encoder = self.gpu_config.get_encoder()
+                self.gpu_status_label.setText(f"GPU: {gpu_name} | 编码器: {encoder}")
+                self.status_label.setText(f"已启用GPU硬件加速")
+                
+                # 显示成功消息
+                QMessageBox.information(
+                    self, 
+                    "GPU检测成功", 
+                    f"已检测到GPU并启用硬件加速:\n\n"
+                    f"GPU: {primary_gpu} ({primary_vendor})\n"
+                    f"编码器: {encoder}"
+                )
+            else:
+                # 检查是否是FFmpeg不可用导致的问题
+                ffmpeg_issue = False
+                if hasattr(self, 'gpu_info') and 'ffmpeg_compatibility' in self.gpu_info:
+                    compat_info = self.gpu_info.get('ffmpeg_compatibility', {})
+                    if 'error' in compat_info and "FFmpeg不可用" in compat_info.get('error', ''):
+                        ffmpeg_issue = True
+                
+                if ffmpeg_issue:
+                    # 尝试自动解决FFmpeg问题
+                    self._try_fix_ffmpeg(primary_gpu, primary_vendor)
+                    return
+                
+                # 检查是否是在远程会话中（可能仍然可以使用NVIDIA加速）
+                if 'oray' in primary_vendor.lower() or 'unknown' in primary_vendor.lower() or 'remote' in primary_vendor.lower():
+                    # 尝试最后一次通过nvidia-smi检测
+                    import subprocess
+                    try:
+                        process = subprocess.Popen(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+                        try:
+                            stdout, stderr = process.communicate(timeout=3)
+                            output = stdout.decode('utf-8', errors='ignore')
+                            
+                            if 'NVIDIA-SMI' in output and 'Driver Version' in output:
+                                # 成功检测到NVIDIA GPU，手动配置
+                                self.gpu_config._set_nvidia_config_direct()
+                                gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
+                                encoder = self.gpu_config.get_encoder()
+                                
+                                # 更新UI
+                                self.combo_gpu.setCurrentText("Nvidia显卡")
+                                self.gpu_status_label.setText(f"GPU: {gpu_name} | 编码器: {encoder}")
+                                self.status_label.setText(f"已启用GPU硬件加速 (远程会话模式)")
+                                
+                                # 显示成功消息
+                                QMessageBox.information(
+                                    self, 
+                                    "GPU检测成功", 
+                                    f"已在远程会话中检测到NVIDIA GPU并启用硬件加速:\n\n"
+                                    f"GPU: {gpu_name}\n"
+                                    f"编码器: {encoder}"
+                                )
+                                return
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                
+                # 常规处理方式
+                self.gpu_status_label.setText(f"GPU: {primary_gpu} | 不支持硬件加速")
+                self.status_label.setText("GPU检测完成，但未启用硬件加速")
+                
+                # 显示警告消息
+                QMessageBox.warning(
+                    self, 
+                    "GPU检测完成", 
+                    f"已检测到GPU，但未能配置硬件加速:\n\n"
+                    f"GPU: {primary_gpu} ({primary_vendor})\n\n"
+                    f"可能原因:\n"
+                    f"- FFmpeg不支持该GPU的硬件加速\n"
+                    f"- 驱动程序版本过旧\n"
+                    f"- 系统兼容性问题\n"
+                    f"- 远程会话限制\n\n"
+                    f"如果您使用远程控制软件(如向日葵)，请尝试断开连接后在本地运行。\n\n"
+                    f"将使用CPU模式处理视频。"
+                )
+        else:
+            # 未检测到GPU
+            self.combo_gpu.setCurrentText("CPU处理")
+            self.gpu_status_label.setText("GPU: 未检测到")
+            self.status_label.setText("未检测到GPU，将使用CPU处理")
+            
+            # 显示消息
+            QMessageBox.information(
+                self, 
+                "GPU检测结果", 
+                "未检测到可用的GPU，将使用CPU处理视频。"
+            )
+    
+    def _try_fix_ffmpeg(self, gpu_name, gpu_vendor):
+        """尝试修复FFmpeg问题"""
+        import os
+        import subprocess
+        from pathlib import Path
+        
+        self.status_label.setText("正在尝试修复FFmpeg问题...")
+        
+        # 搜索常见的FFmpeg安装位置
+        potential_paths = []
+        
+        # 1. 检查环境变量
+        if "PATH" in os.environ:
+            path_dirs = os.environ["PATH"].split(os.pathsep)
+            for directory in path_dirs:
+                ffmpeg_path = os.path.join(directory, "ffmpeg.exe")
+                if os.path.exists(ffmpeg_path):
+                    potential_paths.append(ffmpeg_path)
+        
+        # 2. 检查常见安装位置
+        common_locations = [
+            "C:\\FFmpeg\\bin\\ffmpeg.exe",
+            "C:\\Program Files\\FFmpeg\\bin\\ffmpeg.exe", 
+            "C:\\Program Files (x86)\\FFmpeg\\bin\\ffmpeg.exe",
+            str(Path.home() / "FFmpeg" / "bin" / "ffmpeg.exe"),
+            "D:\\FFmpeg\\bin\\ffmpeg.exe"
+        ]
+        
+        for location in common_locations:
+            if os.path.exists(location):
+                potential_paths.append(location)
+        
+        # 3. 检查软件自带的ffmpeg
+        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        bundled_ffmpeg = os.path.join(app_dir, "bin", "ffmpeg.exe")
+        if os.path.exists(bundled_ffmpeg):
+            potential_paths.append(bundled_ffmpeg)
+        
+        # 如果找到了FFmpeg，询问是否配置
+        if potential_paths:
+            paths_str = "\n".join(potential_paths)
+            
+            reply = QMessageBox.question(
+                self,
+                "找到FFmpeg",
+                f"检测到GPU ({gpu_name})，但FFmpeg不可用或不可访问。\n\n"
+                f"我们在您的系统中找到了以下FFmpeg可执行文件:\n\n{paths_str}\n\n"
+                f"是否要使用第一个路径配置FFmpeg？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # 使用第一个可用路径配置FFmpeg
+                try:
+                    with open("ffmpeg_path.txt", "w") as f:
+                        f.write(potential_paths[0])
+                    
+                    self.status_label.setText(f"已配置FFmpeg路径: {potential_paths[0]}")
+                    self.gpu_status_label.setText(f"GPU: {gpu_name}")
+                    
+                    # 重新检测GPU
+                    QMessageBox.information(
+                        self,
+                        "FFmpeg已配置",
+                        f"FFmpeg路径已配置为:\n{potential_paths[0]}\n\n"
+                        f"请重新点击'检测显卡'按钮以完成GPU配置。"
+                    )
+                    return
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "配置失败",
+                        f"配置FFmpeg路径时出错:\n{str(e)}"
+                    )
+        
+        # 如果没有找到FFmpeg或用户拒绝使用找到的路径
+        reply = QMessageBox.question(
+            self,
+            "FFmpeg问题",
+            f"检测到GPU ({gpu_name})，但无法使用FFmpeg分析硬件加速兼容性。\n\n"
+            f"您可以选择:\n"
+            f"1. 手动配置FFmpeg路径\n"
+            f"2. 尝试自动配置硬件加速 (不使用FFmpeg)\n\n"
+            f"是否要尝试自动配置硬件加速？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply == QMessageBox.Yes:
+            # 尝试根据GPU类型自动配置
+            gpu_vendor_lower = gpu_vendor.lower()
+            
+            # 更新状态栏
+            self.status_label.setText("正在尝试自动配置硬件加速...")
+            
+            # 根据GPU类型设置配置
+            if 'nvidia' in gpu_vendor_lower:
+                self.gpu_config._set_nvidia_config_direct()
+                success = True
+            elif 'amd' in gpu_vendor_lower:
+                # 设置AMD配置
+                self.gpu_config.config['use_hardware_acceleration'] = True
+                self.gpu_config.config['encoder'] = 'h264_amf'
+                self.gpu_config.config['decoder'] = ''
+                self.gpu_config.config['detected_gpu'] = gpu_name
+                self.gpu_config.config['detected_vendor'] = gpu_vendor
+                self.gpu_config._set_amd_config()
+                self.gpu_config._save_config()
+                success = True
+            elif 'intel' in gpu_vendor_lower:
+                # 设置Intel配置
+                self.gpu_config.config['use_hardware_acceleration'] = True
+                self.gpu_config.config['encoder'] = 'h264_qsv'
+                self.gpu_config.config['decoder'] = 'h264_qsv'
+                self.gpu_config.config['detected_gpu'] = gpu_name
+                self.gpu_config.config['detected_vendor'] = gpu_vendor
+                self.gpu_config._set_intel_config()
+                self.gpu_config._save_config()
+                success = True
+            else:
+                success = False
+            
+            if success:
+                # 获取配置
+                gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
+                encoder = self.gpu_config.get_encoder()
+                
+                # 更新UI
+                self.gpu_status_label.setText(f"GPU: {gpu_name} | 编码器: {encoder}")
+                self.status_label.setText(f"已启用GPU硬件加速")
+                
+                # 显示成功消息
+                QMessageBox.information(
+                    self, 
+                    "GPU自动配置成功", 
+                    f"已自动配置GPU硬件加速:\n\n"
+                    f"GPU: {gpu_name}\n"
+                    f"编码器: {encoder}\n\n"
+                    f"注意: 由于无法使用FFmpeg验证兼容性，实际效果可能会有所不同。"
+                )
+            else:
+                # 更新UI
+                self.gpu_status_label.setText(f"GPU: {gpu_name} | 不支持硬件加速")
+                self.status_label.setText("无法自动配置GPU，将使用CPU处理")
+                
+                QMessageBox.warning(
+                    self,
+                    "GPU配置失败",
+                    f"无法自动配置GPU硬件加速，将使用CPU处理视频。\n\n"
+                    f"请手动配置FFmpeg路径后重试。"
+                )
+        else:
+            # 用户选择手动配置
+            self.config_ffmpeg_path()
+            
+            # 更新UI提示用户重新检测
+            self.gpu_status_label.setText(f"GPU: {gpu_name} | 请重新检测")
+            self.status_label.setText("请在配置FFmpeg后重新检测GPU")
+    
+    def _get_compose_params(self):
+        """获取当前合成参数"""
+        params = {
+            "text_mode": self.combo_audio_mode.currentText(),
+            "audio_mode": self.combo_audio_mode.currentText(),
+            "video_mode": self.combo_video_mode.currentText(),
+            "resolution": self.combo_resolution.currentText(),
+            "bitrate": self.spin_bitrate.value(),
+            "gpu": self.combo_gpu.currentText(),
+            "save_dir": self.edit_save_dir.text(),
+            "voice_volume": self.spin_voice_volume.value(),
+            "bgm_volume": self.spin_bgm_volume.value(),
+            "bgm_path": self.edit_bgm_path.text(),
+            "transition": self.combo_transition.currentText(),
+            "generate_count": self.spin_generate_count.value()
+        }
+        return params
+
+    def process_videos(self):
+        try:
+            from core.video_processor import VideoProcessor
+            
+            # 获取合成参数
+            params = self._get_compose_params()
+            save_dir = params["save_dir"]
+            
+            # 获取素材文件夹
+            material_folders = []
+            for row in range(self.video_table.rowCount()):
+                folder_info = {
+                    "name": self.video_table.item(row, 1).text(),
+                    "path": self.video_table.item(row, 2).text()
+                }
+                material_folders.append(folder_info)
+            
+            # 使用GPU配置
+            hardware_accel = False
+            encoder = "libx264"
+            
+            # 修改使用策略：
+            # 1. 如果GPU配置启用了硬件加速，则使用之
+            # 2. 或者根据用户选择的显卡类型强制使用
+            if self.gpu_config.is_hardware_acceleration_enabled():
+                hardware_accel = True
+                encoder = self.gpu_config.get_encoder()
+                logger.info(f"使用GPU配置中的硬件加速：{encoder}")
+            elif params["gpu"] == "Nvidia显卡" or params["gpu"] == "自动检测":
+                # 用户选择NVIDIA或自动，强制使用NVENC
+                hardware_accel = True
+                encoder = "h264_nvenc"
+                logger.info(f"用户选择使用NVIDIA，强制启用硬件加速：{encoder}")
+            elif params["gpu"] == "AMD显卡":
+                hardware_accel = True
+                encoder = "h264_amf"
+                logger.info(f"用户选择使用AMD，强制启用硬件加速：{encoder}")
+            elif params["gpu"] == "Intel显卡":
+                hardware_accel = True
+                encoder = "h264_qsv"
+                logger.info(f"用户选择使用Intel，强制启用硬件加速：{encoder}")
+            else:
+                # CPU处理或其他选项
+                hardware_accel = False
+                encoder = "libx264"
+                logger.info("使用CPU编码")
+            
+            # 创建处理器
+            settings = {
+                "hardware_accel": "auto" if hardware_accel else "none",
+                "encoder": encoder,
+                "resolution": params["resolution"].split()[1],  # 提取分辨率数字部分
+                "bitrate": params["bitrate"],
+                "voice_volume": params["voice_volume"],
+                "bgm_volume": params["bgm_volume"],
+                "transition": params["transition"].lower(),
+                "transition_duration": 0.5,  # 默认转场时长
+                "threads": 4  # 默认线程数
+            }
+            
+            # 更新状态栏
+            if hardware_accel:
+                self.status_label.setText(f"正在使用硬件加速处理视频 (编码器: {encoder})")
+            else:
+                self.status_label.setText(f"正在使用CPU处理视频 (编码器: {encoder})")
+            
+            # 保存处理器实例以便停止处理
+            self.processor = VideoProcessor(settings, progress_callback=self._update_progress)
+            
+            # 执行批量处理
+            bgm_path = params["bgm_path"] if os.path.exists(params["bgm_path"]) else None
+            count = params["generate_count"]
+            
+            # 实际生成视频
+            output_videos = self.processor.process_batch(
+                material_folders=material_folders,
+                output_dir=save_dir,
+                count=count,
+                bgm_path=bgm_path
+            )
+            
+            # 处理完成
+            QtCore.QMetaObject.invokeMethod(
+                self, 
+                "on_compose_completed", 
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(bool, len(output_videos) > 0),
+                QtCore.Q_ARG(int, len(output_videos)),
+                QtCore.Q_ARG(str, save_dir)
+            )
+        except InterruptedError:
+            # 处理被用户中断
+            QtCore.QMetaObject.invokeMethod(
+                self, 
+                "on_compose_interrupted", 
+                QtCore.Qt.QueuedConnection
+            )
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            QtCore.QMetaObject.invokeMethod(
+                self, 
+                "on_compose_error", 
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(str, str(e)),
+                QtCore.Q_ARG(str, error_msg)
+            )
+        finally:
+            # 清理处理器
+            self.processor = None
+            # 恢复状态栏
+            QtCore.QMetaObject.invokeMethod(
+                self,
+                "_reset_status_bar",
+                QtCore.Qt.QueuedConnection
+            )
+    
+    @QtCore.pyqtSlot()
+    def _reset_status_bar(self):
+        """重置状态栏"""
+        self.status_label.setText("就绪")
+    
     @pyqtSlot()
     def on_start_compose(self):
         """开始合成"""
@@ -522,107 +1111,14 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         self.label_progress.setText("合成进度: 正在初始化...")
         self.progress_bar.setValue(0)
         
-        # 获取合成参数
-        params = self._get_compose_params()
-        
-        # 收集素材文件夹信息
-        material_folders = []
+        # 更新素材状态
         for row in range(self.video_table.rowCount()):
-            folder_info = {
-                "name": self.video_table.item(row, 1).text(),
-                "path": self.video_table.item(row, 2).text()
-            }
-            material_folders.append(folder_info)
-            
-            # 更新状态为处理中
             self.video_table.setItem(row, 5, QTableWidgetItem("处理中"))
         
         # 在单独线程中执行视频合成，避免阻塞UI
         import threading
-        
-        def process_videos():
-            try:
-                from core.video_processor import VideoProcessor
-                
-                # 创建处理器
-                settings = {
-                    "hardware_accel": "auto" if "Nvidia" in params["gpu"] else "none",
-                    "encoder": "h264_nvenc" if "Nvidia" in params["gpu"] else "libx264",
-                    "resolution": params["resolution"].split()[1],  # 提取分辨率数字部分
-                    "bitrate": params["bitrate"],
-                    "voice_volume": params["voice_volume"],
-                    "bgm_volume": params["bgm_volume"],
-                    "transition": params["transition"].lower(),
-                    "transition_duration": 0.5,  # 默认转场时长
-                    "threads": 4  # 默认线程数
-                }
-                
-                # 保存处理器实例以便停止处理
-                self.processor = VideoProcessor(settings, progress_callback=self._update_progress)
-                
-                # 执行批量处理
-                bgm_path = params["bgm_path"] if os.path.exists(params["bgm_path"]) else None
-                count = params["generate_count"]
-                
-                # 实际生成视频
-                output_videos = self.processor.process_batch(
-                    material_folders=material_folders,
-                    output_dir=save_dir,
-                    count=count,
-                    bgm_path=bgm_path
-                )
-                
-                # 处理完成
-                QtCore.QMetaObject.invokeMethod(
-                    self, 
-                    "on_compose_completed", 
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(bool, len(output_videos) > 0),
-                    QtCore.Q_ARG(int, len(output_videos)),
-                    QtCore.Q_ARG(str, save_dir)
-                )
-            except InterruptedError:
-                # 处理被用户中断
-                QtCore.QMetaObject.invokeMethod(
-                    self, 
-                    "on_compose_interrupted", 
-                    QtCore.Qt.QueuedConnection
-                )
-            except Exception as e:
-                import traceback
-                error_msg = traceback.format_exc()
-                QtCore.QMetaObject.invokeMethod(
-                    self, 
-                    "on_compose_error", 
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, str(e)),
-                    QtCore.Q_ARG(str, error_msg)
-                )
-            finally:
-                # 清理处理器
-                self.processor = None
-        
-        # 启动处理线程
-        self.processing_thread = threading.Thread(target=process_videos, daemon=True)
+        self.processing_thread = threading.Thread(target=self.process_videos, daemon=True)
         self.processing_thread.start()
-    
-    def _get_compose_params(self):
-        """获取当前合成参数"""
-        params = {
-            "text_mode": self.combo_audio_mode.currentText(),
-            "audio_mode": self.combo_audio_mode.currentText(),
-            "video_mode": self.combo_video_mode.currentText(),
-            "resolution": self.combo_resolution.currentText(),
-            "bitrate": self.spin_bitrate.value(),
-            "gpu": self.combo_gpu.currentText(),
-            "save_dir": self.edit_save_dir.text(),
-            "voice_volume": self.spin_voice_volume.value(),
-            "bgm_volume": self.spin_bgm_volume.value(),
-            "bgm_path": self.edit_bgm_path.text(),
-            "transition": self.combo_transition.currentText(),
-            "generate_count": self.spin_generate_count.value()
-        }
-        return params
     
     @pyqtSlot()
     def on_stop_compose(self):
@@ -1065,3 +1561,511 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         
         # 显示对话框
         log_dialog.exec_()
+
+    def _init_statusbar(self):
+        """初始化状态栏"""
+        # 创建状态栏
+        self.statusBar = QStatusBar()
+        self.setStatusBar(self.statusBar)
+        
+        # 创建状态标签
+        self.status_label = QLabel("就绪")
+        self.gpu_status_label = QLabel("GPU: 未检测")
+        
+        # 添加到状态栏
+        self.statusBar.addWidget(self.status_label, 1)  # 1表示拉伸因子
+        self.statusBar.addPermanentWidget(self.gpu_status_label)  # 永久显示在右侧
+        
+        # 在启动时显示当前GPU状态
+        self._init_gpu_status()
+    
+    def _init_gpu_status(self):
+        """在启动时初始化GPU状态显示"""
+        try:
+            # 如果已经配置了GPU，直接显示其信息
+            if self.gpu_config.is_hardware_acceleration_enabled():
+                gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
+                encoder = self.gpu_config.get_encoder()
+                self.gpu_status_label.setText(f"GPU: {gpu_name} | 编码器: {encoder}")
+                
+                # 更新下拉框
+                if 'nvidia' in gpu_vendor.lower():
+                    self.combo_gpu.setCurrentText("Nvidia显卡")
+                elif 'amd' in gpu_vendor.lower():
+                    self.combo_gpu.setCurrentText("AMD显卡")
+                elif 'intel' in gpu_vendor.lower():
+                    self.combo_gpu.setCurrentText("Intel显卡")
+            else:
+                # 未配置GPU，显示默认状态
+                self.gpu_status_label.setText("GPU: 未检测 (点击检测按钮)")
+                
+                # 尝试进行简单的GPU检测，不阻塞UI
+                import threading
+                
+                def quick_detect():
+                    try:
+                        from hardware.system_analyzer import SystemAnalyzer
+                        
+                        # 仅进行基本检测
+                        analyzer = SystemAnalyzer(deep_gpu_detection=False)
+                        system_info = analyzer.analyze()
+                        gpu_info = system_info.get('gpu', {})
+                        
+                        # 如果检测到GPU，更新状态栏
+                        if gpu_info.get('available', False):
+                            primary_gpu = gpu_info.get('primary_gpu', '未知')
+                            QtCore.QMetaObject.invokeMethod(
+                                self, 
+                                "_update_initial_gpu_label", 
+                                QtCore.Qt.QueuedConnection,
+                                QtCore.Q_ARG(str, primary_gpu)
+                            )
+                    except Exception:
+                        pass
+                
+                # 启动快速检测线程
+                detect_thread = threading.Thread(target=quick_detect, daemon=True)
+                detect_thread.start()
+        except Exception as e:
+            # 出错时不更新GPU状态，保持默认状态
+            import logging
+            logging.error(f"初始化GPU状态时出错: {str(e)}")
+    
+    @QtCore.pyqtSlot(str)
+    def _update_initial_gpu_label(self, gpu_name):
+        """更新初始GPU标签"""
+        self.gpu_status_label.setText(f"GPU: {gpu_name} (点击检测按钮启用)")
+
+    def run_gpu_test(self):
+        """运行GPU加速测试"""
+        import subprocess
+        import os
+        import time
+        from pathlib import Path
+        
+        # 检查是否启用了硬件加速
+        if not self.gpu_config.is_hardware_acceleration_enabled():
+            QMessageBox.warning(
+                self,
+                "硬件加速未启用",
+                "请先检测显卡并启用硬件加速，然后再运行此测试。"
+            )
+            return
+        
+        # 获取GPU配置
+        gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
+        encoder = self.gpu_config.get_encoder()
+        
+        # 显示确认对话框
+        reply = QMessageBox.question(
+            self,
+            "GPU加速测试",
+            f"将执行一个简短的编码测试，以验证GPU硬件加速是否正常工作。\n\n"
+            f"测试将创建一个短视频文件，并使用GPU加速编码。\n"
+            f"检测到的GPU: {gpu_name}\n"
+            f"编码器: {encoder}\n\n"
+            f"是否继续?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # 创建临时目录
+        temp_dir = Path.home() / "VideoMixTool" / "temp"
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # 创建进度对话框
+        progress_dialog = QMessageBox(self)
+        progress_dialog.setIcon(QMessageBox.Information)
+        progress_dialog.setWindowTitle("GPU测试进行中")
+        progress_dialog.setText("正在执行GPU加速测试，请稍候...")
+        progress_dialog.setStandardButtons(QMessageBox.NoButton)
+        
+        # 显示进度对话框但不阻塞
+        progress_dialog.show()
+        
+        # 更新状态栏
+        self.status_label.setText("正在执行GPU加速测试...")
+        
+        # 在后台线程中执行测试
+        def run_test():
+            test_success = False
+            error_message = ""
+            gpu_utilization = "未知"
+            encoding_speed = "未知"
+            
+            try:
+                # 生成测试视频参数
+                test_input = os.path.join(temp_dir, "gpu_test_input.mp4")
+                test_output = os.path.join(temp_dir, "gpu_test_output.mp4")
+                
+                # 获取FFmpeg路径
+                ffmpeg_cmd = "ffmpeg"
+                ffmpeg_path_file = Path(__file__).resolve().parent.parent.parent / "ffmpeg_path.txt"
+                if ffmpeg_path_file.exists():
+                    with open(ffmpeg_path_file, 'r') as f:
+                        custom_path = f.read().strip()
+                        if custom_path and os.path.exists(custom_path):
+                            ffmpeg_cmd = custom_path
+                
+                # 生成测试视频 (10秒,彩条)
+                gen_cmd = [
+                    ffmpeg_cmd, "-f", "lavfi", "-i", "testsrc=duration=5:size=1920x1080:rate=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                    "-c:v", "libx264", "-c:a", "aac", "-y", test_input
+                ]
+                
+                subprocess.run(gen_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
+                # 设置GPU加速编码命令
+                gpu_params = []
+                if "nvenc" in encoder:
+                    # NVIDIA GPU参数
+                    gpu_params = [
+                        "-c:v", encoder,
+                        "-preset", "p2",
+                        "-tune", "hq",
+                        "-rc", "vbr_hq",
+                        "-spatial-aq", "1",
+                        "-temporal-aq", "1"
+                    ]
+                elif "qsv" in encoder:
+                    # Intel GPU参数
+                    gpu_params = [
+                        "-c:v", encoder,
+                        "-preset", "medium",
+                        "-global_quality", "23"
+                    ]
+                elif "amf" in encoder:
+                    # AMD GPU参数
+                    gpu_params = [
+                        "-c:v", encoder,
+                        "-quality", "quality",
+                        "-usage", "transcoding"
+                    ]
+                
+                # 使用GPU加速编码测试视频
+                encode_cmd = [
+                    ffmpeg_cmd, "-i", test_input,
+                    "-c:a", "copy",
+                    "-y"
+                ] + gpu_params + [test_output]
+                
+                # 记录NVIDIA GPU状态（前）
+                if "nvenc" in encoder:
+                    try:
+                        gpu_cmd = ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]
+                        gpu_before = subprocess.check_output(gpu_cmd, universal_newlines=True).strip()
+                    except Exception:
+                        pass
+                
+                # 记录开始时间
+                start_time = time.time()
+                
+                # 执行编码命令
+                process = subprocess.Popen(
+                    encode_cmd, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True
+                )
+                
+                # 等待进程完成
+                stdout, stderr = process.communicate()
+                
+                # 编码用时
+                encode_time = time.time() - start_time
+                
+                # 记录NVIDIA GPU状态（后）
+                if "nvenc" in encoder:
+                    try:
+                        gpu_cmd = ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]
+                        gpu_after = subprocess.check_output(gpu_cmd, universal_newlines=True).strip()
+                        gpu_utilization = f"{gpu_after}%"
+                    except Exception:
+                        pass
+                
+                # 验证结果
+                if process.returncode == 0 and os.path.exists(test_output) and os.path.getsize(test_output) > 0:
+                    # 计算编码速度
+                    if encode_time > 0:
+                        # 视频是5秒长
+                        encoding_speed = f"{5 / encode_time:.2f}x"
+                    
+                    # 检查输出视频是否正确
+                    probe_cmd = [ffmpeg_cmd, "-i", test_output]
+                    probe_process = subprocess.run(
+                        probe_cmd, 
+                        check=False, 
+                        stdout=subprocess.PIPE, 
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
+                    
+                    if encoder in probe_process.stderr:
+                        test_success = True
+                    else:
+                        error_message = "输出视频未使用指定编码器，GPU加速可能未正常工作"
+                else:
+                    error_message = f"编码失败，返回码: {process.returncode}"
+                    if stderr:
+                        error_message += f"\n错误输出: {stderr[:200]}..."
+            except Exception as e:
+                error_message = f"测试过程中出错: {str(e)}"
+            finally:
+                # 更新UI
+                QtCore.QMetaObject.invokeMethod(
+                    self, 
+                    "_show_gpu_test_result", 
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(bool, test_success),
+                    QtCore.Q_ARG(str, error_message),
+                    QtCore.Q_ARG(str, gpu_utilization),
+                    QtCore.Q_ARG(str, encoding_speed)
+                )
+                
+                # 清理临时文件
+                try:
+                    if os.path.exists(test_input):
+                        os.remove(test_input)
+                    if os.path.exists(test_output):
+                        os.remove(test_output)
+                except Exception:
+                    pass
+        
+        # 启动测试线程
+        import threading
+        test_thread = threading.Thread(target=run_test)
+        test_thread.daemon = True
+        test_thread.start()
+    
+    @QtCore.pyqtSlot(bool, str, str, str)
+    def _show_gpu_test_result(self, success, error_message, gpu_utilization, encoding_speed):
+        """显示GPU测试结果"""
+        # 关闭可能的进度对话框
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, QMessageBox) and widget.windowTitle() == "GPU测试进行中":
+                widget.close()
+        
+        # 更新状态栏
+        self.status_label.setText("就绪")
+        
+        # 显示结果
+        if success:
+            QMessageBox.information(
+                self,
+                "GPU测试成功",
+                f"GPU加速测试成功完成!\n\n"
+                f"检测到的GPU: {self.gpu_config.get_gpu_info()[0]}\n"
+                f"编码器: {self.gpu_config.get_encoder()}\n"
+                f"GPU利用率: {gpu_utilization}\n"
+                f"编码速度: {encoding_speed} (实时速度倍数)\n\n"
+                f"您的系统已成功使用GPU硬件加速编码视频。"
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "GPU测试失败",
+                f"GPU加速测试未能成功完成。\n\n"
+                f"检测到的GPU: {self.gpu_config.get_gpu_info()[0]}\n"
+                f"编码器: {self.gpu_config.get_encoder()}\n"
+                f"GPU利用率: {gpu_utilization}\n\n"
+                f"错误信息: {error_message}\n\n"
+                f"可能原因:\n"
+                f"1. FFmpeg编译版本不支持该GPU硬件加速\n"
+                f"2. GPU驱动程序版本过旧\n"
+                f"3. 系统环境问题\n\n"
+                f"建议尝试更新GPU驱动，或使用CPU模式处理视频。"
+            )
+    
+    def show_gpu_status(self):
+        """显示当前GPU状态信息"""
+        import subprocess
+        import threading
+        
+        # 创建状态对话框
+        status_dialog = QMessageBox(self)
+        status_dialog.setIcon(QMessageBox.Information)
+        status_dialog.setWindowTitle("正在获取GPU状态...")
+        status_dialog.setText("正在获取GPU状态信息，请稍候...")
+        status_dialog.setStandardButtons(QMessageBox.Cancel)
+        
+        # 获取更新信息的函数
+        def get_gpu_info():
+            info_text = ""
+            try:
+                # 检测FFmpeg
+                ffmpeg_cmd = "ffmpeg"
+                ffmpeg_path_file = Path(__file__).resolve().parent.parent.parent / "ffmpeg_path.txt"
+                if ffmpeg_path_file.exists():
+                    with open(ffmpeg_path_file, 'r') as f:
+                        custom_path = f.read().strip()
+                        if custom_path and os.path.exists(custom_path):
+                            ffmpeg_cmd = custom_path
+                
+                ffmpeg_info = "未检测到"
+                try:
+                    result = subprocess.run(
+                        [ffmpeg_cmd, "-version"], 
+                        stdout=subprocess.PIPE, 
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=2
+                    )
+                    if result.returncode == 0:
+                        version_line = result.stdout.splitlines()[0]
+                        ffmpeg_info = version_line
+                except Exception as e:
+                    ffmpeg_info = f"错误: {str(e)}"
+                
+                # GPU基本信息
+                gpu_name = "未检测到"
+                gpu_driver = "未知"
+                gpu_memory = "未知"
+                gpu_util = "未知"
+                encoder_usage = "未知"
+                
+                # 尝试通过nvidia-smi获取信息
+                try:
+                    gpu_cmd = ["nvidia-smi", "--query-gpu=name,driver_version,memory.total,utilization.gpu,utilization.memory", 
+                             "--format=csv,noheader,nounits"]
+                    gpu_output = subprocess.check_output(gpu_cmd, universal_newlines=True).strip().split(', ')
+                    
+                    if len(gpu_output) >= 5:
+                        gpu_name = gpu_output[0]
+                        gpu_driver = gpu_output[1]
+                        gpu_memory = f"{int(gpu_output[2]):,} MB"
+                        gpu_util = f"{gpu_output[3]}%"
+                        memory_util = f"{gpu_output[4]}%"
+                        
+                        # 获取编码器使用情况
+                        enc_cmd = ["nvidia-smi", "--query-gpu=encoder.stats.sessionCount,encoder.stats.averageFps", 
+                                 "--format=csv,noheader"]
+                        enc_output = subprocess.check_output(enc_cmd, universal_newlines=True).strip().split(', ')
+                        
+                        if len(enc_output) >= 2:
+                            session_count = enc_output[0]
+                            avg_fps = enc_output[1]
+                            encoder_usage = f"会话数: {session_count}, 平均帧率: {avg_fps}"
+                except Exception:
+                    pass
+                
+                # GPU配置信息
+                gpu_configured = "未配置"
+                encoder_configured = "未配置"
+                
+                if self.gpu_config.is_hardware_acceleration_enabled():
+                    gpu_name_config, _ = self.gpu_config.get_gpu_info()
+                    encoder_configured = self.gpu_config.get_encoder()
+                    gpu_configured = f"{gpu_name_config} (已配置)"
+                
+                # 构建信息文本
+                info_text = (
+                    f"=== 系统信息 ===\n"
+                    f"FFmpeg版本: {ffmpeg_info}\n\n"
+                    f"=== GPU硬件信息 ===\n"
+                    f"检测到的GPU: {gpu_name}\n"
+                    f"驱动版本: {gpu_driver}\n"
+                    f"显存容量: {gpu_memory}\n"
+                    f"当前GPU利用率: {gpu_util}\n"
+                    f"编码器使用情况: {encoder_usage}\n\n"
+                    f"=== 软件配置信息 ===\n"
+                    f"配置的GPU: {gpu_configured}\n"
+                    f"配置的编码器: {encoder_configured}\n"
+                )
+            except Exception as e:
+                info_text = f"获取GPU状态时出错:\n{str(e)}"
+            
+            # 更新UI
+            QtCore.QMetaObject.invokeMethod(
+                self, 
+                "_update_gpu_status_dialog", 
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(str, info_text)
+            )
+        
+        # 启动信息获取线程
+        info_thread = threading.Thread(target=get_gpu_info)
+        info_thread.daemon = True
+        info_thread.start()
+        
+        # 显示对话框
+        status_dialog.exec_()
+    
+    @QtCore.pyqtSlot(str)
+    def _update_gpu_status_dialog(self, info_text):
+        """更新GPU状态对话框"""
+        # 关闭旧对话框
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, QMessageBox) and widget.windowTitle() == "正在获取GPU状态...":
+                widget.close()
+        
+        # 创建新的详细对话框
+        detail_dialog = QMessageBox(self)
+        detail_dialog.setIcon(QMessageBox.Information)
+        detail_dialog.setWindowTitle("GPU状态信息")
+        detail_dialog.setText(info_text)
+        detail_dialog.setStandardButtons(QMessageBox.Ok)
+        
+        # 显示详细信息对话框
+        detail_dialog.exec_()
+
+    def _init_gpu_detection(self):
+        """初始化GPU检测部分"""
+        # GPU检测布局
+        gpu_detection_layout = QVBoxLayout()
+        
+        # GPU检测标题
+        gpu_title_layout = QHBoxLayout()
+        gpu_title_label = QLabel("硬件加速设置")
+        gpu_title_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        gpu_title_layout.addWidget(gpu_title_label)
+        gpu_title_layout.addStretch()
+        
+        # GPU检测按钮布局
+        gpu_btn_layout = QHBoxLayout()
+        
+        # GPU检测按钮
+        self.btn_detect_gpu = QPushButton("检测显卡")
+        self.btn_detect_gpu.setIcon(QIcon("resources/icons/gpu-icon.png"))
+        self.btn_detect_gpu.clicked.connect(self.detect_gpu)
+        gpu_btn_layout.addWidget(self.btn_detect_gpu)
+        
+        # 硬件加速选择
+        self.combo_gpu = QComboBox()
+        self.combo_gpu.addItems(["自动检测", "CPU处理", "Nvidia显卡", "AMD显卡", "Intel显卡"])
+        self.combo_gpu.setCurrentText("自动检测")
+        gpu_btn_layout.addWidget(self.combo_gpu)
+        
+        # 添加兼容模式复选框
+        self.chk_compatibility_mode = QCheckBox("兼容模式")
+        self.chk_compatibility_mode.setToolTip("启用兼容模式以支持旧版本驱动，如果遇到编码错误请勾选")
+        self.chk_compatibility_mode.setChecked(self.gpu_config.is_compatibility_mode_enabled())
+        self.chk_compatibility_mode.stateChanged.connect(self._on_compatibility_mode_changed)
+        gpu_btn_layout.addWidget(self.chk_compatibility_mode)
+        
+        # 组装GPU检测部分布局
+        gpu_detection_layout.addLayout(gpu_title_layout)
+        gpu_detection_layout.addLayout(gpu_btn_layout)
+        
+        # 返回完整布局
+        return gpu_detection_layout
+
+    @QtCore.pyqtSlot(int)
+    def _on_compatibility_mode_changed(self, state):
+        """处理兼容模式复选框状态变化"""
+        enabled = state == Qt.Checked
+        success = self.gpu_config.set_compatibility_mode(enabled)
+        
+        if success:
+            if enabled:
+                self.status_label.setText("已启用GPU兼容模式，适用于旧版本驱动")
+                logging.info("用户启用了GPU兼容模式")
+            else:
+                self.status_label.setText("已禁用GPU兼容模式，使用高级编码参数")
+                logging.info("用户禁用了GPU兼容模式")
+        else:
+            self.status_label.setText("更改兼容模式设置需要先检测到NVIDIA显卡")
+            logging.warning("更改兼容模式失败：未检测到NVIDIA显卡")
