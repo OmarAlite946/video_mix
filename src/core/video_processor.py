@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple, Callable
+import uuid
+import datetime
 
 try:
     import cv2
@@ -90,26 +92,56 @@ class VideoProcessor:
             ffmpeg_path_file = project_root / "ffmpeg_path.txt"
             
             if ffmpeg_path_file.exists():
-                with open(ffmpeg_path_file, 'r') as f:
+                with open(ffmpeg_path_file, 'r', encoding="utf-8") as f:
                     custom_path = f.read().strip()
                     if custom_path and os.path.exists(custom_path):
                         logger.info(f"使用自定义FFmpeg路径: {custom_path}")
                         ffmpeg_cmd = custom_path
+                    else:
+                        logger.warning(f"自定义FFmpeg路径无效或不存在: {custom_path}")
         except Exception as e:
             logger.error(f"读取自定义FFmpeg路径时出错: {str(e)}")
         
         try:
             # 尝试执行ffmpeg命令
+            logger.info(f"正在检查FFmpeg: {ffmpeg_cmd}")
             result = subprocess.run(
                 [ffmpeg_cmd, "-version"], 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=3
+                timeout=5  # 增加超时时间
             )
             
             if result.returncode == 0:
-                logger.info("FFmpeg可用，版本信息：" + result.stdout.splitlines()[0])
+                version_info = result.stdout.splitlines()[0] if result.stdout else "未知版本"
+                logger.info(f"FFmpeg可用，版本信息：{version_info}")
+                
+                # 检查编码器支持
+                try:
+                    encoders_result = subprocess.run(
+                        [ffmpeg_cmd, "-encoders"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5
+                    )
+                    
+                    if encoders_result.returncode == 0:
+                        encoders_output = encoders_result.stdout
+                        # 检查硬件加速编码器
+                        hw_encoders = []
+                        for encoder in ["nvenc", "qsv", "amf", "vaapi"]:
+                            if encoder in encoders_output:
+                                hw_encoders.append(encoder)
+                        
+                        if hw_encoders:
+                            logger.info(f"检测到支持的硬件加速编码器: {', '.join(hw_encoders)}")
+                        else:
+                            logger.info("未检测到支持的硬件加速编码器")
+                except Exception as e:
+                    logger.warning(f"检查编码器支持时出错: {str(e)}")
+                
                 return True
             else:
                 error_detail = f"返回码: {result.returncode}, 错误: {result.stderr}"
@@ -124,6 +156,9 @@ class VideoProcessor:
             return False
         except PermissionError:
             logger.error(f"没有执行FFmpeg的权限: {ffmpeg_cmd}")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error(f"检查FFmpeg超时，可能系统资源不足或FFmpeg无响应")
             return False
         except Exception as e:
             logger.error(f"检查FFmpeg时出错: {str(e)}, 类型: {type(e).__name__}")
@@ -157,17 +192,38 @@ class VideoProcessor:
         批量处理视频
         
         Args:
-            material_folders: 素材文件夹信息列表，每个字典包含场景名称、路径等信息
+            material_folders: 素材文件夹列表，每个文件夹包含视频和配音
             output_dir: 输出目录
-            count: 生成视频数量
+            count: 生成的视频数量
             bgm_path: 背景音乐路径
             
         Returns:
             List[str]: 生成的视频文件路径列表
         """
+        # 检查FFmpeg是否可用
+        if not self._check_ffmpeg():
+            raise RuntimeError("FFmpeg不可用，无法处理视频")
+        
+        # 记录处理开始
         logger.info(f"开始批量处理视频，生成数量: {count}")
         logger.info(f"素材文件夹数量: {len(material_folders)}")
         logger.info(f"输出目录: {output_dir}")
+        
+        # 检查硬件加速配置
+        if self.settings.get("hardware_accel", "none") != "none":
+            # 记录GPU信息
+            logger.info(f"已启用硬件加速: {self.settings.get('hardware_accel')} - 编码器: {self.settings.get('encoder', 'libx264')}")
+            try:
+                # 检查NVIDIA GPU状态
+                if "nvenc" in self.settings.get("encoder", "").lower() or "nvidia" in self.settings.get("encoder", "").lower():
+                    self._log_gpu_info("处理开始前")
+            except Exception as e:
+                logger.warning(f"检查GPU状态时出错: {e}")
+        else:
+            logger.info(f"使用CPU处理: 编码器 - {self.settings.get('encoder', 'libx264')}")
+        
+        # 检查中断标志并重置
+        self.stop_requested = False
         
         if not material_folders:
             error_msg = "没有可用的素材文件夹，请先添加素材"
@@ -210,15 +266,6 @@ class VideoProcessor:
             warning_msg = f"背景音乐文件不存在: {bgm_path}，将不使用背景音乐"
             logger.warning(warning_msg)
             bgm_path = None
-        
-        # 再次检查FFmpeg是否可用
-        if not self._check_ffmpeg():
-            error_msg = "FFmpeg不可用，无法执行视频处理。请安装FFmpeg并确保可以在命令行中使用，或使用配置路径功能。"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-        
-        # 重置停止标志
-        self.stop_requested = False
         
         # 扫描素材文件夹前检查硬件状态
         try:
@@ -497,20 +544,35 @@ class VideoProcessor:
         处理单个视频
         
         Args:
-            material_data: 素材数据，包含各场景的视频和配音信息
-            output_path: 输出视频路径
+            material_data: 素材数据
+            output_path: 输出路径
             bgm_path: 背景音乐路径
-            progress_start: 进度条开始百分比
-            progress_end: 进度条结束百分比
+            progress_start: 进度开始百分比
+            progress_end: 进度结束百分比
             
         Returns:
             str: 生成的视频文件路径
         """
-        logger.info(f"开始处理视频，输出路径: {output_path}")
-        
-        if self.stop_requested:
-            logger.info("收到停止请求，中断视频合成")
-            raise InterruptedError("视频处理被用户中断")
+        # 处理output_path，确保使用短路径名
+        original_output_path = output_path
+        if os.name == 'nt':
+            try:
+                import win32api
+                # 确保输出目录存在
+                output_dir = os.path.dirname(output_path)
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir, exist_ok=True)
+                # 获取输出目录的短路径名
+                output_dir_short = win32api.GetShortPathName(output_dir)
+                # 合成新的输出路径
+                output_filename = os.path.basename(output_path)
+                output_path = os.path.join(output_dir_short, output_filename)
+                logger.info(f"输出路径已转换为短路径: {original_output_path} -> {output_path}")
+            except ImportError:
+                logger.warning("win32api模块未安装，无法转换输出路径为短路径名")
+            except Exception as e:
+                logger.warning(f"转换输出路径失败: {str(e)}，将使用原始路径")
+                output_path = original_output_path
         
         # 计算进度范围
         progress_range = progress_end - progress_start
@@ -761,31 +823,143 @@ class VideoProcessor:
                     # 创建临时文件路径用于原始视频
                     temp_raw_video = self._create_temp_file("temp_raw", ".mp4")
                     
+                    # 根据硬件加速类型确定要使用的编码器
+                    if self.settings["hardware_accel"] == "auto" or self.settings["hardware_accel"] == "force":
+                        # 如果是自动或强制硬件加速，根据encoder设置确定编码器
+                        encoder_setting = self.settings.get("encoder", "").lower()
+                        if "nvidia" in encoder_setting or "nvenc" in encoder_setting:
+                            codec = "h264_nvenc"
+                        elif "intel" in encoder_setting or "qsv" in encoder_setting:
+                            codec = "h264_qsv"
+                        elif "amd" in encoder_setting or "amf" in encoder_setting:
+                            codec = "h264_amf"
+                    
                     logger.info(f"将使用FFmpeg直接编码，编码器: {codec}")
                     logger.info(f"硬件加速配置: {self.settings['hardware_accel']}")
                     logger.info(f"编码器设置: {self.settings['encoder']}")
                     
-                    # 先导出为临时视频（无特殊编码）
+                    # 添加进度监控函数
+                    export_start_time = time.time()
+                    def progress_monitor():
+                        """监控视频导出进度的线程函数"""
+                        last_progress = 0
+                        while not self.stop_requested and os.path.exists(temp_raw_video):
+                            try:
+                                # 尝试预估进度
+                                elapsed_time = time.time() - export_start_time
+                                if final_clip.duration > 0:
+                                    # 以实际经过时间预估进度，假设导出处理速度为实时速度的2-5倍
+                                    est_progress = min(0.95, elapsed_time / (final_clip.duration * 3))
+                                    if est_progress > last_progress:
+                                        last_progress = est_progress
+                                        percent = progress_start + progress_range * (0.8 + 0.15 * est_progress)
+                                        self.report_progress(f"正在导出临时视频... {int(est_progress * 100)}%", percent)
+                            except Exception as e:
+                                logger.error(f"进度监控错误: {str(e)}")
+                            
+                            # 每秒更新一次进度
+                            time.sleep(1)
+                    
+                    # 启动进度监控线程
                     progress_thread = threading.Thread(target=progress_monitor)
                     progress_thread.daemon = True
                     progress_thread.start()
                     
-                    # 导出视频但使用快速编码，不使用特殊硬件加速
-                    final_clip.write_videofile(
-                        temp_raw_video, 
-                        fps=30, 
-                        codec="libx264",
-                        audio_codec="aac",
-                        remove_temp=True,
-                        write_logfile=False,
-                        preset="ultrafast", 
-                        verbose=False,
-                        threads=self.settings["threads"]
-                    )
+                    try:
+                        # 导出视频时也使用GPU编码
+                        # 确保使用硬件加速编码器，如果兼容模式开启则使用GPU编码器，否则回退到libx264
+                        temp_codec = codec if self.settings.get("compatibility_mode", True) else "libx264"
+                        logger.info(f"临时文件将使用编码器: {temp_codec}")
+                        
+                        # 记录最终确定的硬件编码器
+                        final_encoder = temp_codec
+                        logger.info(f"最终确定的硬件编码器: {final_encoder}")
+                        
+                        # 导出视频使用GPU编码
+                        final_clip.write_videofile(
+                            temp_raw_video, 
+                            fps=30, 
+                            codec=temp_codec,  # 对临时文件也尝试使用GPU编码
+                            audio_codec="aac",
+                            remove_temp=True,
+                            write_logfile=False,
+                            preset="fast", 
+                            verbose=False,
+                            threads=self.settings["threads"],
+                            ffmpeg_params=[
+                                "-hide_banner", "-y",
+                                "-pix_fmt", "yuv420p",  # 确保使用标准像素格式
+                                "-profile:v", "high",   # 使用高质量配置文件
+                                "-level", "4.1",        # 兼容性级别
+                                "-movflags", "+faststart" # 优化网络流式传输
+                            ]
+                        )
+                    except Exception as e:
+                        logger.warning(f"使用GPU编码器 {codec} 处理临时文件失败: {str(e)}")
+                        logger.warning("回退到使用CPU编码器(libx264)处理临时文件")
+                        
+                        # 如果GPU编码失败，回退到CPU编码
+                        final_clip.write_videofile(
+                            temp_raw_video, 
+                            fps=30, 
+                            codec="libx264",  # 回退到CPU编码器
+                            audio_codec="aac",
+                            remove_temp=True,
+                            write_logfile=False,
+                            preset="ultrafast", 
+                            verbose=False,
+                            threads=self.settings["threads"],
+                            ffmpeg_params=[
+                                "-hide_banner", "-y",
+                                "-pix_fmt", "yuv420p",
+                                "-profile:v", "high",
+                                "-level", "4.1",
+                                "-movflags", "+faststart"
+                            ]
+                        )
                     
                     # 再使用FFmpeg进行硬件加速编码
                     if os.path.exists(temp_raw_video):
-                        success = self._encode_with_ffmpeg(temp_raw_video, output_path, codec)
+                        logger.info(f"临时文件已生成，准备使用GPU加速编码器 {codec} 进行最终编码")
+                        
+                        # 检查临时文件有效性
+                        temp_valid = self._check_video_file(temp_raw_video)
+                        if not temp_valid:
+                            logger.warning(f"临时文件 {temp_raw_video} 无效或损坏，尝试重新生成")
+                            # 尝试简单的拷贝转换临时文件
+                            try:
+                                repaired_temp = self._create_temp_file("repaired_raw", ".mp4")
+                                ffmpeg_cmd = self._get_ffmpeg_cmd()
+                                repair_cmd = [
+                                    ffmpeg_cmd, 
+                                    "-i", temp_raw_video,
+                                    "-c", "copy",
+                                    "-y",
+                                    repaired_temp
+                                ]
+                                
+                                # 处理Windows中文路径
+                                if os.name == 'nt':
+                                    try:
+                                        import win32api
+                                        if os.path.exists(temp_raw_video):
+                                            repair_cmd[2] = win32api.GetShortPathName(temp_raw_video)
+                                    except Exception as e:
+                                        logger.warning(f"转换临时文件路径失败: {str(e)}")
+                                
+                                logger.info(f"尝试修复临时文件: {' '.join(repair_cmd)}")
+                                subprocess.run(repair_cmd, check=True)
+                                
+                                if os.path.exists(repaired_temp) and self._check_video_file(repaired_temp):
+                                    logger.info("临时文件修复成功")
+                                    temp_raw_video = repaired_temp
+                                else:
+                                    logger.warning("临时文件修复失败")
+                            except Exception as e:
+                                logger.error(f"尝试修复临时文件时出错: {str(e)}")
+                        
+                        # 使用FFmpeg进行最终编码
+                        success = self._encode_with_ffmpeg(temp_raw_video, output_path, self.settings["hardware_accel"], codec)
                         
                         # 如果成功，删除临时文件并返回
                         if success:
@@ -794,67 +968,21 @@ class VideoProcessor:
                             except Exception as e:
                                 logger.warning(f"无法删除临时文件: {str(e)}")
                             
-                            logger.info(f"使用FFmpeg硬件加速导出视频成功: {output_path}")
-                            self.report_progress("视频导出完成", progress_end)
-                            return output_path
+                            # 验证输出文件
+                            if self._check_video_file(output_path):
+                                logger.info(f"使用FFmpeg硬件加速导出视频成功: {output_path}")
+                                self.report_progress("视频导出完成", progress_end)
+                                return output_path
+                            else:
+                                logger.error("导出的视频文件无效或损坏")
+                                if os.path.exists(output_path):
+                                    try:
+                                        os.remove(output_path)
+                                    except Exception:
+                                        pass
+                                raise RuntimeError("导出的视频文件无效或损坏")
                         else:
                             logger.warning("硬件加速失败，回退到标准编码")
-                
-                # 创建临时音频文件路径
-                temp_audiofile = self._create_temp_file("temp_audio", ".m4a")
-                
-                # 进度更新线程
-                export_start_time = time.time()
-                def progress_monitor():
-                    """监控视频导出进度的线程函数"""
-                    last_progress = 0
-                    while not self.stop_requested and os.path.exists(temp_audiofile):
-                        try:
-                            # 尝试预估进度
-                            elapsed_time = time.time() - export_start_time
-                            if final_clip.duration > 0:
-                                # 以实际经过时间预估进度，假设导出处理速度为实时速度的2-5倍
-                                # 这只是估计值，因为实际导出速度取决于硬件性能和视频复杂度
-                                est_progress = min(0.95, elapsed_time / (final_clip.duration * 3))
-                                if est_progress > last_progress:
-                                    last_progress = est_progress
-                                    percent = progress_start + progress_range * (0.8 + 0.15 * est_progress)
-                                    self.report_progress(f"正在导出视频... {int(est_progress * 100)}%", percent)
-                        except Exception as e:
-                            logger.error(f"进度监控错误: {str(e)}")
-                        
-                        # 每秒更新一次进度
-                        time.sleep(1)
-                
-                # 启动进度监控线程
-                progress_thread = threading.Thread(target=progress_monitor)
-                progress_thread.daemon = True
-                progress_thread.start()
-                
-                # 导出视频
-                final_clip.write_videofile(
-                    output_path, 
-                    fps=30, 
-                    codec=codec,
-                    audio_codec=audio_codec,
-                    temp_audiofile=temp_audiofile,
-                    remove_temp=True,
-                    write_logfile=False,
-                    preset="fast", 
-                    verbose=False,
-                    **export_params
-                )
-                
-                # 检查视频是否成功导出
-                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                    error_msg = f"导出视频失败: {output_path} 文件不存在或为空"
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                    
-                logger.info(f"视频导出成功: {output_path}")
-                self.report_progress("视频导出完成", progress_end)
-                
-                return output_path
             except Exception as e:
                 logger.error(f"导出视频失败: {str(e)}")
                 if os.path.exists(output_path):
@@ -1133,14 +1261,42 @@ class VideoProcessor:
         Returns:
             str: 临时文件路径
         """
-        temp_dir = self.settings["temp_dir"]
-        os.makedirs(temp_dir, exist_ok=True)
+        import uuid
+        import datetime
         
-        timestamp = int(time.time() * 1000)
-        random_str = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=6))
-        filename = f"{prefix}_{timestamp}_{random_str}{suffix}"
+        # 确保临时目录存在
+        temp_dir = self.settings.get("temp_dir", os.path.join(os.path.expanduser("~"), "VideoMixTool", "temp"))
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir, exist_ok=True)
         
-        return os.path.join(temp_dir, filename)
+        # 生成唯一文件名：前缀 + 时间戳 + UUID
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        unique_str = str(uuid.uuid4()).replace("-", "")[:8]
+        filename = f"{prefix}_{timestamp}_{unique_str}{suffix}"
+        
+        # 完整路径
+        temp_path = os.path.join(temp_dir, filename)
+        
+        # 在Windows环境下转换为短路径名
+        if os.name == 'nt':
+            try:
+                import win32api
+                # 确保目录存在
+                if not os.path.exists(os.path.dirname(temp_path)):
+                    os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+                # 创建一个空文件以获取短路径名
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    pass
+                # 获取短路径名
+                temp_path = win32api.GetShortPathName(temp_path)
+                logger.debug(f"临时文件路径已转换为短路径: {temp_path}")
+            except ImportError:
+                logger.warning("win32api模块未安装，无法转换为短路径名")
+            except Exception as e:
+                logger.warning(f"转换临时文件路径失败: {str(e)}")
+        
+        logger.debug(f"创建临时文件: {temp_path}")
+        return temp_path
     
     def clean_temp_files(self):
         """清理临时文件"""
@@ -1159,79 +1315,162 @@ class VideoProcessor:
     
     def _should_use_direct_ffmpeg(self, codec):
         """
-        判断是否应该使用直接FFmpeg命令进行硬件加速编码
+        判断是否应该使用直接FFmpeg命令进行编码
+        主要用于启用硬件加速时跳过MoviePy的编码流程
         
         Args:
-            codec: 编码器名称
+            codec: 当前使用的编码器
             
         Returns:
             bool: 是否应该使用直接FFmpeg命令
         """
-        # 对于NVENC编码器，始终使用直接FFmpeg命令以确保GPU加速
-        if "nvenc" in codec:
-            logger.info(f"检测到NVENC编码器 {codec}，将使用直接FFmpeg硬件加速")
-            return True
+        # 如果硬件加速没有启用，直接返回False
+        hardware_accel = self.settings.get("hardware_accel", "none")
+        if hardware_accel == "none":
+            logger.info(f"硬件加速未启用，不使用直接FFmpeg")
+            return False
+        
+        # 检查编码器
+        # 根据硬件加速设置调整编码器
+        encoder_setting = self.settings.get("encoder", "").lower()
+        if hardware_accel != "none":
+            if "nvidia" in encoder_setting or "nvenc" in encoder_setting:
+                codec = "h264_nvenc"
+            elif "intel" in encoder_setting or "qsv" in encoder_setting:
+                codec = "h264_qsv"
+            elif "amd" in encoder_setting or "amf" in encoder_setting:
+                codec = "h264_amf"
+            elif codec == "libx264":  # 如果是CPU编码器但启用了硬件加速
+                # 尝试自动检测硬件类型
+                try:
+                    from hardware.gpu_config import GPUConfig
+                    gpu_config = GPUConfig()
+                    if gpu_config.is_hardware_acceleration_enabled():
+                        encoder = gpu_config.get_encoder()
+                        if encoder and encoder != "libx264":
+                            codec = encoder
+                            logger.info(f"从GPU配置中获取编码器: {codec}")
+                except Exception as e:
+                    logger.warning(f"检查GPU配置时出错: {str(e)}")
+                    # 默认使用NVENC
+                    codec = "h264_nvenc"
+                    logger.info(f"无法确定硬件编码器，默认使用: {codec}")
         
         # 只对特定的硬件加速编码器使用直接FFmpeg命令
-        return codec in ["h264_nvenc", "h264_qsv", "h264_amf", "hevc_nvenc"]
+        hw_encoders = ["h264_nvenc", "h264_qsv", "h264_amf", "hevc_nvenc", "hevc_qsv", "hevc_amf"]
+        result = codec in hw_encoders
+        logger.info(f"编码器 {codec} {'支持' if result else '不支持'}直接FFmpeg硬件加速")
+        return result
     
-    def _encode_with_ffmpeg(self, input_path, output_path, codec):
+    def _encode_with_ffmpeg(self, input_path, output_path, hardware_type="auto", codec="libx264"):
         """
-        使用FFmpeg直接进行视频编码，充分利用硬件加速
+        使用FFmpeg进行视频编码
         
         Args:
-            input_path: 输入视频文件路径
-            output_path: 输出视频文件路径
-            codec: 编码器名称
+            input_path: 输入文件路径
+            output_path: 输出文件路径
+            hardware_type: 硬件加速类型
+            codec: 视频编码器
             
         Returns:
-            bool: 是否成功
+            bool: 编码是否成功
         """
-        import subprocess
-        
-        # 构建FFmpeg命令
+        # 获取FFmpeg命令路径
         ffmpeg_cmd = self._get_ffmpeg_cmd()
         
-        # 修复强制使用NVENC编码
-        if "h264" in codec and not "nvenc" in codec and "nvidia" in self.settings.get("encoder", "").lower():
-            codec = "h264_nvenc"
-            logger.info(f"检测到NVIDIA设置，强制使用h264_nvenc编码器")
+        # 记录原始编码器
+        original_codec = codec
+        
+        # 检查是否启用了硬件加速
+        if hardware_type != "none" and hardware_type != "":
+            # 如果指定了硬件加速但编码器为默认编码器，则根据硬件类型选择合适的编码器
+            if codec == "libx264":
+                # 尝试从encoder设置中确定正确的硬件编码器
+                encoder_setting = self.settings.get("encoder", "").lower()
+                if "nvenc" in encoder_setting:
+                    codec = "h264_nvenc"
+                    logger.info(f"根据encoder设置调整为NVIDIA编码器: {codec}")
+                elif "qsv" in encoder_setting:
+                    codec = "h264_qsv"
+                    logger.info(f"根据encoder设置调整为Intel编码器: {codec}")
+                elif "amf" in encoder_setting:
+                    codec = "h264_amf"
+                    logger.info(f"根据encoder设置调整为AMD编码器: {codec}")
+                else:
+                    # 如果无法从encoder设置确定，根据硬件类型推断
+                    if hardware_type == "auto" or "nvidia" in hardware_type:
+                        codec = "h264_nvenc"
+                        logger.info(f"根据硬件加速类型调整为NVIDIA编码器: {codec}")
+                    elif "intel" in hardware_type:
+                        codec = "h264_qsv"
+                        logger.info(f"根据硬件加速类型调整为Intel编码器: {codec}")
+                    elif "amd" in hardware_type:
+                        codec = "h264_amf"
+                        logger.info(f"根据硬件加速类型调整为AMD编码器: {codec}")
+        
+        # 记录最终确定的硬件编码器
+        logger.info(f"最终确定的编码器: {codec} (原始编码器: {original_codec})")
         
         # 检查是否启用了兼容模式
         compatibility_mode = True  # 默认启用兼容模式
         gpu_config = None
         try:
             # 尝试从配置中读取兼容模式设置
-            from src.hardware.gpu_config import GPUConfig
+            from hardware.gpu_config import GPUConfig
             gpu_config = GPUConfig()
             compatibility_mode = gpu_config.is_compatibility_mode_enabled()
             logger.info(f"GPU兼容模式设置: {'启用' if compatibility_mode else '禁用'}")
         except Exception as e:
             logger.warning(f"读取GPU兼容模式设置时出错: {str(e)}，将使用默认兼容模式")
         
-        logger.info(f"将使用编码器: {codec}")
+        # 视频格式标准化参数 - 添加这些参数确保输出视频兼容性
+        format_params = [
+            "-pix_fmt", "yuv420p",   # 使用标准像素格式
+            "-profile:v", "high",    # 使用高质量配置文件
+            "-level", "4.1",         # 兼容性级别
+            "-movflags", "+faststart" # 优化网络流式传输
+        ]
         
         # GPU加速相关参数
         gpu_params = []
         # NVENC特殊参数
         if "nvenc" in codec:
-            # 始终使用兼容模式参数
-            logger.info("使用NVENC编码 - 兼容模式参数")
-            gpu_params = [
-                "-c:v", codec,
-                "-preset", "p4",  # 兼容性好的预设
-                "-b:v", f"{self.settings['bitrate']}k",
-                "-spatial-aq", "1",  # 保留基础的自适应量化
-                "-temporal-aq", "1",  # 保留基础的时间自适应量化
-                "-gpu", "0"          # 显式指定使用第一个GPU
-            ]
+            # 使用兼容模式参数还是高性能参数
+            if compatibility_mode:
+                logger.info("使用NVENC编码 - 兼容模式参数")
+                gpu_params = [
+                    "-c:v", codec,
+                    "-preset", "p4",  # 兼容性好的预设
+                    "-b:v", f"{self.settings['bitrate']}k",
+                    "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k", # 最大比特率
+                    "-bufsize", f"{self.settings['bitrate'] * 2}k",        # 缓冲区大小
+                    "-spatial-aq", "1",  # 保留基础的自适应量化
+                    "-temporal-aq", "1"  # 保留基础的时间自适应量化
+                ]
+            else:
+                logger.info("使用NVENC编码 - 高性能模式参数")
+                # 新版NVENC参数格式
+                gpu_params = [
+                    "-c:v", codec,
+                    "-preset", "p2",
+                    "-tune", "hq",
+                    "-b:v", f"{self.settings.get('bitrate', 5000)}k",
+                    "-maxrate", f"{int(self.settings.get('bitrate', 5000) * 1.5)}k",
+                    "-bufsize", f"{self.settings.get('bitrate', 5000) * 2}k",
+                    "-rc", "vbr",  # 使用vbr替代vbr_hq
+                    "-multipass", "2",  # 添加多通道编码参数
+                    "-spatial-aq", "1",
+                    "-temporal-aq", "1",
+                    "-cq", "19",
+                ]
         # QSV特殊参数
         elif codec == "h264_qsv":
             gpu_params = [
                 "-c:v", codec,
                 "-preset", "medium",
                 "-global_quality", "23",
-                "-b:v", f"{self.settings['bitrate']}k"
+                "-b:v", f"{self.settings['bitrate']}k",
+                "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k"
             ]
         # AMF特殊参数
         elif codec == "h264_amf":
@@ -1239,13 +1478,18 @@ class VideoProcessor:
                 "-c:v", codec,
                 "-quality", "quality",
                 "-usage", "transcoding",
-                "-b:v", f"{self.settings['bitrate']}k"
+                "-b:v", f"{self.settings['bitrate']}k",
+                "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k"
             ]
         else:
-            # 其他编码器使用基本参数
+            # 其他编码器使用基本参数 (如libx264)
             gpu_params = [
                 "-c:v", codec,
-                "-b:v", f"{self.settings['bitrate']}k"
+                "-preset", "medium",  # libx264的预设
+                "-crf", "23",         # 质量参数
+                "-b:v", f"{self.settings['bitrate']}k",
+                "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k",
+                "-bufsize", f"{self.settings['bitrate'] * 2}k"
             ]
         
         # 通用参数
@@ -1253,6 +1497,7 @@ class VideoProcessor:
             "-i", input_path,
             "-c:a", "aac",  # 音频编码器
             "-b:a", "192k", # 音频比特率
+            "-ar", "48000", # 音频采样率
             "-y"            # 覆盖输出文件
         ]
         
@@ -1262,7 +1507,7 @@ class VideoProcessor:
             thread_params = ["-threads", str(self.settings["threads"])]
         
         # 组合完整命令
-        cmd = [ffmpeg_cmd] + common_params + gpu_params + thread_params + [output_path]
+        cmd = [ffmpeg_cmd] + common_params + gpu_params + format_params + thread_params + [output_path]
         
         # 记录实际使用的命令
         cmd_str = " ".join(cmd)
@@ -1277,14 +1522,40 @@ class VideoProcessor:
             if codec == "h264_nvenc":
                 self._log_gpu_info("编码开始前")
             
-            with open(log_file, 'w') as log:
+            # 确保命令中的路径符合Windows命令行要求（处理中文路径）
+            # 将cmd中的所有路径参数进行正确转换
+            # 路径可能出现在input_path，output_path参数位置
+            if os.name == 'nt':  # 在Windows系统下
+                for i, arg in enumerate(cmd):
+                    # 如果参数看起来像文件路径（包含路径分隔符）
+                    if isinstance(arg, str) and ('/' in arg or '\\' in arg):
+                        # 使用短路径名来避免中文路径问题
+                        try:
+                            import win32api
+                            # 确保路径存在，如果是输出路径可能还不存在
+                            if os.path.exists(arg) or i == len(cmd) - 1:  # 最后一个参数是输出路径
+                                # 如果是输出路径但目录不存在，则先创建目录
+                                if i == len(cmd) - 1 and not os.path.exists(os.path.dirname(arg)):
+                                    os.makedirs(os.path.dirname(arg), exist_ok=True)
+                                # 获取短路径名
+                                if os.path.exists(arg):
+                                    cmd[i] = win32api.GetShortPathName(arg)
+                                    logger.debug(f"将路径转换为短路径: {arg} -> {cmd[i]}")
+                        except Exception as e:
+                            logger.warning(f"转换路径时出错: {str(e)}，将保持原始路径")
+            
+            with open(log_file, 'w', encoding='utf-8') as log:
+                # 设置编码为UTF-8并启用错误替换
                 process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     universal_newlines=True,
                     bufsize=1,
-                    text=True
+                    text=True,
+                    encoding='utf-8',      # 明确设置编码为UTF-8
+                    errors='replace',       # 对于无法解码的字符进行替换
+                    shell=False            # 避免shell注入风险
                 )
                 
                 # 记录开始时间
@@ -1348,12 +1619,25 @@ class VideoProcessor:
                         
                         # 提取文件时长和比特率
                         try:
+                            # 同样处理info_cmd中的路径
                             info_cmd = [ffmpeg_cmd, "-i", output_path]
+                            
+                            # 在Windows环境下处理可能包含中文的路径
+                            if os.name == 'nt':
+                                try:
+                                    import win32api
+                                    if os.path.exists(output_path):
+                                        info_cmd[2] = win32api.GetShortPathName(output_path)
+                                except Exception as e:
+                                    logger.warning(f"转换输出路径时出错: {str(e)}，将保持原始路径")
+                            
                             info_proc = subprocess.Popen(
                                 info_cmd, 
                                 stdout=subprocess.PIPE, 
                                 stderr=subprocess.PIPE,
-                                universal_newlines=True
+                                universal_newlines=True,
+                                encoding='utf-8',  # 确保使用UTF-8编码
+                                errors='replace'   # 对于无法解码的字符进行替换
                             )
                             _, stderr = info_proc.communicate()
                             
@@ -1378,7 +1662,7 @@ class VideoProcessor:
                     
                     # 尝试从日志中提取错误信息
                     try:
-                        with open(log_file, 'r') as f:
+                        with open(log_file, 'r', encoding='utf-8') as f:
                             last_lines = "".join(f.readlines()[-20:])  # 读取最后20行
                             logger.error(f"FFmpeg错误输出: {last_lines}")
                     except Exception:
@@ -1405,15 +1689,27 @@ class VideoProcessor:
             ffmpeg_path_file = project_root / "ffmpeg_path.txt"
             
             if ffmpeg_path_file.exists():
-                with open(ffmpeg_path_file, 'r') as f:
+                with open(ffmpeg_path_file, 'r', encoding="utf-8") as f:
                     custom_path = f.read().strip()
                     if custom_path and os.path.exists(custom_path):
                         logger.info(f"使用自定义FFmpeg路径: {custom_path}")
-                        return custom_path
+                        
+                        # 在Windows环境下处理中文路径
+                        if os.name == 'nt':
+                            try:
+                                import win32api
+                                custom_path = win32api.GetShortPathName(custom_path)
+                                logger.info(f"转换为短路径名: {custom_path}")
+                            except ImportError:
+                                logger.warning("无法导入win32api模块，将使用原始路径")
+                            except Exception as e:
+                                logger.warning(f"转换FFmpeg路径时出错: {str(e)}，将使用原始路径")
+                        
+                        ffmpeg_cmd = custom_path
         except Exception as e:
             logger.error(f"读取自定义FFmpeg路径时出错: {str(e)}")
         
-        return ffmpeg_cmd 
+        return ffmpeg_cmd
 
     def _log_gpu_info(self, stage=""):
         """
@@ -1444,3 +1740,62 @@ class VideoProcessor:
                 logger.info(f"编码器状态({stage}) - 会话数: {session_count}, 平均帧率: {avg_fps} fps")
         except Exception as e:
             logger.debug(f"记录GPU信息时出错: {str(e)}") 
+    
+    def _check_video_file(self, file_path: str) -> bool:
+        """
+        检查视频文件是否有效
+        
+        Args:
+            file_path: 视频文件路径
+            
+        Returns:
+            bool: 文件是否有效
+        """
+        if not os.path.exists(file_path) or os.path.getsize(file_path) < 1000:
+            logger.warning(f"视频文件不存在或太小: {file_path}")
+            return False
+            
+        try:
+            # 使用ffprobe检查文件有效性
+            ffmpeg_cmd = self._get_ffmpeg_cmd()
+            ffprobe_cmd = ffmpeg_cmd.replace("ffmpeg", "ffprobe")
+            
+            # 如果ffprobe不存在，尝试使用ffmpeg
+            if not os.path.exists(ffprobe_cmd):
+                ffprobe_cmd = ffmpeg_cmd
+                
+            # 处理Windows中文路径
+            if os.name == 'nt':
+                try:
+                    import win32api
+                    if os.path.exists(file_path):
+                        file_path_short = win32api.GetShortPathName(file_path)
+                    else:
+                        return False
+                except Exception as e:
+                    logger.warning(f"转换路径时出错: {str(e)}")
+                    file_path_short = file_path
+            else:
+                file_path_short = file_path
+                
+            # 构建命令
+            cmd = [ffprobe_cmd, "-v", "error", "-select_streams", "v:0", "-show_entries", 
+                   "stream=codec_type,width,height,duration", "-of", "json", file_path_short]
+                
+            # 执行命令
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            
+            if result.returncode != 0:
+                logger.warning(f"ffprobe检查视频失败: {result.stderr}")
+                return False
+                
+            # 检查输出是否包含有效的视频流信息
+            if "codec_type" in result.stdout and "video" in result.stdout:
+                return True
+            else:
+                logger.warning(f"视频文件不包含有效视频流: {file_path}")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"检查视频文件有效性时出错: {str(e)}")
+            return False

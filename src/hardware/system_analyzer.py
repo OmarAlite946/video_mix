@@ -63,7 +63,7 @@ class SystemAnalyzer:
         
         Args:
             deep_gpu_detection: 是否进行深度GPU检测，会消耗较多时间
-            
+        
         Returns:
             dict: 系统硬件信息
         """

@@ -789,49 +789,101 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         """尝试修复FFmpeg问题"""
         import os
         import subprocess
+        import glob
+        import logging
         from pathlib import Path
+        
+        logger = logging.getLogger(__name__)
+        logger.info("尝试修复FFmpeg问题")
         
         self.status_label.setText("正在尝试修复FFmpeg问题...")
         
         # 搜索常见的FFmpeg安装位置
         potential_paths = []
         
-        # 1. 检查环境变量
+        # 1. 检查安装程序目录 - 优先检查
+        app_dir = Path(__file__).resolve().parent.parent.parent
+        ffmpeg_compat_dir = app_dir / "ffmpeg_compat"
+        
+        # 检查是否有兼容版本的ffmpeg
+        bundled_ffmpeg = ffmpeg_compat_dir / "ffmpeg.exe"
+        if bundled_ffmpeg.exists():
+            potential_paths.append(str(bundled_ffmpeg))
+            logger.info(f"找到兼容版本的FFmpeg: {bundled_ffmpeg}")
+        
+        # 检查bin目录
+        bin_ffmpeg = app_dir / "bin" / "ffmpeg.exe"
+        if bin_ffmpeg.exists():
+            potential_paths.append(str(bin_ffmpeg))
+            logger.info(f"找到bin目录的FFmpeg: {bin_ffmpeg}")
+        
+        # 2. 检查环境变量
         if "PATH" in os.environ:
             path_dirs = os.environ["PATH"].split(os.pathsep)
             for directory in path_dirs:
-                ffmpeg_path = os.path.join(directory, "ffmpeg.exe")
-                if os.path.exists(ffmpeg_path):
-                    potential_paths.append(ffmpeg_path)
+                try:
+                    ffmpeg_path = os.path.join(directory, "ffmpeg.exe")
+                    if os.path.exists(ffmpeg_path):
+                        potential_paths.append(ffmpeg_path)
+                        logger.info(f"在PATH中找到FFmpeg: {ffmpeg_path}")
+                except Exception as e:
+                    logger.warning(f"检查PATH时出错: {str(e)}")
         
-        # 2. 检查常见安装位置
+        # 3. 检查常见安装位置
         common_locations = [
             "C:\\FFmpeg\\bin\\ffmpeg.exe",
             "C:\\Program Files\\FFmpeg\\bin\\ffmpeg.exe", 
             "C:\\Program Files (x86)\\FFmpeg\\bin\\ffmpeg.exe",
             str(Path.home() / "FFmpeg" / "bin" / "ffmpeg.exe"),
-            "D:\\FFmpeg\\bin\\ffmpeg.exe"
+            "D:\\FFmpeg\\bin\\ffmpeg.exe",
+            "C:\\tools\\ffmpeg\\bin\\ffmpeg.exe",
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "ffmpeg", "bin", "ffmpeg.exe")
         ]
         
         for location in common_locations:
             if os.path.exists(location):
                 potential_paths.append(location)
+                logger.info(f"在常见位置找到FFmpeg: {location}")
         
-        # 3. 检查软件自带的ffmpeg
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        bundled_ffmpeg = os.path.join(app_dir, "bin", "ffmpeg.exe")
-        if os.path.exists(bundled_ffmpeg):
-            potential_paths.append(bundled_ffmpeg)
+        # 4. 尝试在C盘和D盘上搜索ffmpeg.exe
+        try:
+            # 限制搜索深度，避免过长时间
+            for drive in ["C:", "D:"]:
+                if os.path.exists(drive):
+                    # 搜索Program Files和Program Files (x86)
+                    for program_dir in ["Program Files", "Program Files (x86)"]:
+                        search_path = os.path.join(drive, program_dir)
+                        if os.path.exists(search_path):
+                            # 使用glob模式匹配
+                            for ffmpeg_path in glob.glob(os.path.join(search_path, "*ffmpeg*", "**", "ffmpeg.exe"), recursive=True):
+                                if ffmpeg_path not in potential_paths:
+                                    potential_paths.append(ffmpeg_path)
+                                    logger.info(f"在{search_path}搜索到FFmpeg: {ffmpeg_path}")
+        except Exception as e:
+            logger.warning(f"搜索FFmpeg时出错: {str(e)}")
         
-        # 如果找到了FFmpeg，询问是否配置
-        if potential_paths:
-            paths_str = "\n".join(potential_paths)
+        # 测试找到的FFmpeg
+        valid_paths = []
+        for path in potential_paths:
+            try:
+                logger.info(f"测试FFmpeg: {path}")
+                result = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0 and "ffmpeg version" in result.stdout:
+                    valid_paths.append(path)
+                    logger.info(f"有效的FFmpeg: {path}, 版本: {result.stdout.split(chr(10))[0]}")
+            except Exception as e:
+                logger.warning(f"测试FFmpeg时出错: {path}, {str(e)}")
+        
+        # 如果找到了有效的FFmpeg，询问是否配置
+        if valid_paths:
+            paths_str = "\n".join(valid_paths)
             
             reply = QMessageBox.question(
                 self,
                 "找到FFmpeg",
                 f"检测到GPU ({gpu_name})，但FFmpeg不可用或不可访问。\n\n"
-                f"我们在您的系统中找到了以下FFmpeg可执行文件:\n\n{paths_str}\n\n"
+                f"我们在您的系统中找到了以下可用的FFmpeg程序:\n\n{paths_str}\n\n"
                 f"是否要使用第一个路径配置FFmpeg？",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes
@@ -840,21 +892,27 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             if reply == QMessageBox.Yes:
                 # 使用第一个可用路径配置FFmpeg
                 try:
-                    with open("ffmpeg_path.txt", "w") as f:
-                        f.write(potential_paths[0])
+                    selected_path = valid_paths[0]
+                    # 确保项目路径存在
+                    project_root = Path(__file__).resolve().parent.parent.parent
                     
-                    self.status_label.setText(f"已配置FFmpeg路径: {potential_paths[0]}")
+                    with open(project_root / "ffmpeg_path.txt", "w", encoding="utf-8") as f:
+                        f.write(selected_path)
+                    
+                    logger.info(f"已配置FFmpeg路径: {selected_path}")
+                    self.status_label.setText(f"已配置FFmpeg路径: {selected_path}")
                     self.gpu_status_label.setText(f"GPU: {gpu_name}")
                     
                     # 重新检测GPU
                     QMessageBox.information(
                         self,
                         "FFmpeg已配置",
-                        f"FFmpeg路径已配置为:\n{potential_paths[0]}\n\n"
+                        f"FFmpeg路径已配置为:\n{selected_path}\n\n"
                         f"请重新点击'检测显卡'按钮以完成GPU配置。"
                     )
                     return
                 except Exception as e:
+                    logger.error(f"配置FFmpeg路径时出错: {str(e)}")
                     QMessageBox.warning(
                         self,
                         "配置失败",
@@ -862,6 +920,71 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                     )
         
         # 如果没有找到FFmpeg或用户拒绝使用找到的路径
+        # 先询问是否要安装FFmpeg兼容版本
+        reply = QMessageBox.question(
+            self,
+            "下载FFmpeg",
+            f"未在系统中找到可用的FFmpeg，或您选择不使用找到的版本。\n\n"
+            f"是否要下载并配置兼容版本的FFmpeg？\n"
+            f"(这需要约30MB的下载，并会自动配置)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        
+        if reply == QMessageBox.Yes:
+            # 尝试运行修复脚本
+            try:
+                self.status_label.setText("正在下载和配置FFmpeg...")
+                from pathlib import Path
+                import subprocess
+                import sys
+                
+                # 获取fix_gpu.py的完整路径
+                fix_script = Path(__file__).resolve().parent.parent.parent / "fix_gpu.py"
+                
+                if fix_script.exists():
+                    logger.info(f"运行FFmpeg修复脚本: {fix_script}")
+                    
+                    # 创建进度对话框
+                    progress = QMessageBox(self)
+                    progress.setWindowTitle("正在配置FFmpeg")
+                    progress.setText("正在下载和配置FFmpeg，请稍候...\n\n这可能需要几分钟时间。")
+                    progress.setStandardButtons(QMessageBox.NoButton)
+                    progress.show()
+                    QApplication.processEvents()
+                    
+                    # 运行修复脚本
+                    process = subprocess.Popen(
+                        [sys.executable, str(fix_script)],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    stdout, stderr = process.communicate()
+                    
+                    # 关闭进度对话框
+                    progress.close()
+                    
+                    if process.returncode == 0:
+                        logger.info("FFmpeg修复成功")
+                        QMessageBox.information(
+                            self,
+                            "FFmpeg配置成功",
+                            "兼容版本的FFmpeg已成功下载和配置。\n\n"
+                            "请重新点击'检测显卡'按钮以完成GPU配置。"
+                        )
+                        return
+                    else:
+                        logger.error(f"FFmpeg修复失败: {stderr}")
+                        # 转到自动配置GPU
+                else:
+                    logger.error(f"未找到修复脚本: {fix_script}")
+                    # 转到自动配置GPU
+            except Exception as e:
+                logger.error(f"运行修复脚本时出错: {str(e)}")
+                # 转到自动配置GPU
+        
+        # 如果下载失败或用户选择不下载，尝试直接配置GPU
         reply = QMessageBox.question(
             self,
             "FFmpeg问题",
@@ -880,62 +1003,57 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             
             # 更新状态栏
             self.status_label.setText("正在尝试自动配置硬件加速...")
+            logger.info(f"尝试自动配置GPU: {gpu_name}, 厂商: {gpu_vendor}")
             
-            # 根据GPU类型设置配置
-            if 'nvidia' in gpu_vendor_lower:
-                self.gpu_config._set_nvidia_config_direct()
-                success = True
-            elif 'amd' in gpu_vendor_lower:
-                # 设置AMD配置
-                self.gpu_config.config['use_hardware_acceleration'] = True
-                self.gpu_config.config['encoder'] = 'h264_amf'
-                self.gpu_config.config['decoder'] = ''
-                self.gpu_config.config['detected_gpu'] = gpu_name
-                self.gpu_config.config['detected_vendor'] = gpu_vendor
-                self.gpu_config._set_amd_config()
-                self.gpu_config._save_config()
-                success = True
-            elif 'intel' in gpu_vendor_lower:
-                # 设置Intel配置
-                self.gpu_config.config['use_hardware_acceleration'] = True
-                self.gpu_config.config['encoder'] = 'h264_qsv'
-                self.gpu_config.config['decoder'] = 'h264_qsv'
-                self.gpu_config.config['detected_gpu'] = gpu_name
-                self.gpu_config.config['detected_vendor'] = gpu_vendor
-                self.gpu_config._set_intel_config()
-                self.gpu_config._save_config()
-                success = True
-            else:
-                success = False
-            
-            if success:
-                # 获取配置
-                gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
-                encoder = self.gpu_config.get_encoder()
+            try:
+                # 使用通用函数进行无FFmpeg配置
+                # 这会根据GPU类型自动设置适合的编码器
+                success = self.gpu_config._set_config_without_ffmpeg({
+                    'primary_gpu': gpu_name,
+                    'primary_vendor': gpu_vendor
+                })
                 
+                if success:
+                    # 获取配置
+                    gpu_name, gpu_vendor = self.gpu_config.get_gpu_info()
+                    encoder = self.gpu_config.get_encoder()
+                    
+                    # 更新UI
+                    self.gpu_status_label.setText(f"GPU: {gpu_name} | 编码器: {encoder}")
+                    self.status_label.setText(f"已启用GPU硬件加速")
+                    
+                    # 显示成功消息
+                    QMessageBox.information(
+                        self, 
+                        "GPU自动配置成功", 
+                        f"已自动配置GPU硬件加速:\n\n"
+                        f"GPU: {gpu_name}\n"
+                        f"编码器: {encoder}\n\n"
+                        f"注意: 由于无法使用FFmpeg验证兼容性，实际效果可能会有所不同。\n"
+                        f"建议尽快安装FFmpeg以获得完整功能。"
+                    )
+                else:
+                    # 更新UI
+                    self.gpu_status_label.setText(f"GPU: {gpu_name} | 不支持硬件加速")
+                    self.status_label.setText("无法自动配置GPU，将使用CPU处理")
+                    
+                    QMessageBox.warning(
+                        self,
+                        "GPU配置失败",
+                        f"无法自动配置GPU硬件加速，将使用CPU处理视频。\n\n"
+                        f"建议安装FFmpeg并配置路径后重试。"
+                    )
+            except Exception as e:
+                logger.error(f"自动配置GPU时出错: {str(e)}")
                 # 更新UI
-                self.gpu_status_label.setText(f"GPU: {gpu_name} | 编码器: {encoder}")
-                self.status_label.setText(f"已启用GPU硬件加速")
-                
-                # 显示成功消息
-                QMessageBox.information(
-                    self, 
-                    "GPU自动配置成功", 
-                    f"已自动配置GPU硬件加速:\n\n"
-                    f"GPU: {gpu_name}\n"
-                    f"编码器: {encoder}\n\n"
-                    f"注意: 由于无法使用FFmpeg验证兼容性，实际效果可能会有所不同。"
-                )
-            else:
-                # 更新UI
-                self.gpu_status_label.setText(f"GPU: {gpu_name} | 不支持硬件加速")
-                self.status_label.setText("无法自动配置GPU，将使用CPU处理")
+                self.gpu_status_label.setText(f"GPU: {gpu_name} | 配置失败")
+                self.status_label.setText("GPU配置出错，将使用CPU处理")
                 
                 QMessageBox.warning(
                     self,
-                    "GPU配置失败",
-                    f"无法自动配置GPU硬件加速，将使用CPU处理视频。\n\n"
-                    f"请手动配置FFmpeg路径后重试。"
+                    "GPU配置错误",
+                    f"配置GPU硬件加速时出错:\n{str(e)}\n\n"
+                    f"将使用CPU处理视频。"
                 )
         else:
             # 用户选择手动配置
@@ -979,7 +1097,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                     "path": self.video_table.item(row, 2).text()
                 }
                 material_folders.append(folder_info)
-            
+                
             # 使用GPU配置
             hardware_accel = False
             encoder = "libx264"
@@ -1009,7 +1127,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 hardware_accel = False
                 encoder = "libx264"
                 logger.info("使用CPU编码")
-            
+                
             # 创建处理器
             settings = {
                 "hardware_accel": "auto" if hardware_accel else "none",

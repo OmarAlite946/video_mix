@@ -104,18 +104,24 @@ class GPUConfig:
                 self._set_cpu_config()
                 return False
             
-            # 判断是否是NVIDIA GPU - 可能在远程会话中
+            # 判断是否是NVIDIA GPU - 针对远程桌面会话优化
             primary_vendor = gpu_info.get('primary_vendor', '').lower()
+            primary_gpu = gpu_info.get('primary_gpu', '')
+            
+            # 远程会话检测 - 常见远程桌面软件在GPU检测中会显示为"Microsoft Remote Display Adapter"或类似名称
+            remote_session = any(remote in primary_vendor.lower() for remote in ['microsoft', 'remote', 'oray', 'rdp', 'virtual', 'unknown', 'basic'])
+            
             if 'nvidia' in primary_vendor:
                 # 直接设置NVIDIA配置
                 self._set_nvidia_config_direct()
-                logger.info(f"检测到NVIDIA GPU: {gpu_info.get('primary_gpu', '未知')}")
+                logger.info(f"检测到NVIDIA GPU: {primary_gpu}")
                 return True
             
-            # 尝试使用nvidia-smi确认是否有NVIDIA卡
-            if self._check_nvidia_gpu_available():
+            # 如果是远程会话，尝试使用nvidia-smi确认是否有NVIDIA卡
+            if remote_session or self._check_nvidia_gpu_available():
+                logger.info("检测到可能的远程会话或通过nvidia-smi确认存在NVIDIA GPU")
                 self._set_nvidia_config_direct()
-                logger.info("通过nvidia-smi确认存在NVIDIA GPU，已设置硬件加速")
+                logger.info("已设置NVIDIA硬件加速")
                 return True
             
             # 检查FFmpeg兼容性
@@ -124,16 +130,19 @@ class GPUConfig:
             # 检查是否有FFmpeg兼容性错误
             if 'error' in ffmpeg_compat:
                 logger.warning(f"FFmpeg兼容性检测错误: {ffmpeg_compat.get('error')}")
+                
                 # 如果是因为FFmpeg不可用，尝试根据GPU类型设置常见的编码器
-                if "FFmpeg不可用" in ffmpeg_compat.get('error', ''):
+                if any(x in ffmpeg_compat.get('error', '') for x in ["FFmpeg不可用", "无法访问", "未安装"]):
+                    logger.info("FFmpeg不可用或无法访问，尝试基于GPU类型设置默认编码器")
                     return self._set_config_without_ffmpeg(gpu_info)
                 
                 # 其他错误，使用CPU编码
+                logger.warning("由于FFmpeg兼容性问题，将使用CPU编码")
                 self._set_cpu_config()
                 return False
             
             if not ffmpeg_compat.get('hardware_acceleration', False):
-                logger.info("检测到GPU但不支持FFmpeg硬件加速，将使用CPU编码")
+                logger.info("检测到GPU但不支持FFmpeg硬件加速，将使用CPU处理")
                 self._set_cpu_config()
                 return False
             
@@ -147,35 +156,43 @@ class GPUConfig:
                 return False
             
             # 设置GPU配置
-            primary_gpu = gpu_info.get('primary_gpu', '未知')
-            primary_vendor = gpu_info.get('primary_vendor', '未知')
-            
             self.config['use_hardware_acceleration'] = True
             self.config['encoder'] = encoders[0]  # 使用第一个推荐编码器
             self.config['detected_gpu'] = primary_gpu
-            self.config['detected_vendor'] = primary_vendor
+            self.config['detected_vendor'] = gpu_info.get('primary_vendor', '未知')
             
             if decoders:
                 self.config['decoder'] = decoders[0]  # 使用第一个推荐解码器
             
             # 根据GPU类型设置额外参数
-            if 'nvidia' in primary_vendor.lower():
+            vendor_lower = self.config['detected_vendor'].lower()
+            if 'nvidia' in vendor_lower:
                 self._set_nvidia_config()
-            elif 'amd' in primary_vendor.lower():
+            elif 'amd' in vendor_lower:
                 self._set_amd_config()
-            elif 'intel' in primary_vendor.lower():
+            elif 'intel' in vendor_lower:
                 self._set_intel_config()
+            else:
+                # 未知厂商，尝试检测通用参数
+                logger.info(f"未知GPU厂商: {self.config['detected_vendor']}，尝试根据编码器确定")
+                if 'nvenc' in self.config['encoder']:
+                    self._set_nvidia_config()
+                elif 'amf' in self.config['encoder']:
+                    self._set_amd_config()
+                elif 'qsv' in self.config['encoder']:
+                    self._set_intel_config()
             
             # 保存配置
             self._save_config()
             
-            logger.info(f"已应用硬件加速配置: {primary_gpu} ({primary_vendor})")
+            logger.info(f"已应用硬件加速配置: {primary_gpu} ({self.config['detected_vendor']})")
             logger.info(f"使用编码器: {self.config['encoder']}")
             
             return True
             
         except Exception as e:
-            logger.error(f"配置硬件加速时出错: {e}")
+            logger.error(f"配置硬件加速时出错: {str(e)}")
+            logger.exception("详细错误信息:")  # 记录详细的堆栈信息
             self._set_cpu_config()
             return False
     
@@ -261,40 +278,103 @@ class GPUConfig:
             
             self.config['use_hardware_acceleration'] = True
             self.config['detected_gpu'] = primary_gpu
-            self.config['detected_vendor'] = primary_vendor
+            self.config['detected_vendor'] = gpu_info.get('primary_vendor', '未知')
             self.config['compatibility_mode'] = True  # 确保兼容模式启用
             
+            # 检查是否有任何GPU厂商标识
+            vendor_keywords = {
+                'nvidia': ['nvidia', 'geforce', 'quadro', 'rtx', 'gtx'],
+                'amd': ['amd', 'radeon', 'rx', 'vega', 'firepro'],
+                'intel': ['intel', 'iris', 'hd graphics', 'uhd graphics']
+            }
+            
+            # 尝试从GPU名称识别厂商
+            gpu_name = primary_gpu.lower()
+            detected_vendor = None
+            
+            for vendor, keywords in vendor_keywords.items():
+                if any(keyword in primary_vendor for keyword in keywords) or any(keyword in gpu_name for keyword in keywords):
+                    detected_vendor = vendor
+                    break
+            
+            # 尝试特殊检测NVIDIA卡（通常能够通过nvidia-smi检测到）
+            if detected_vendor is None and self._check_nvidia_gpu_available():
+                detected_vendor = 'nvidia'
+                logger.info("通过nvidia-smi确认存在NVIDIA GPU")
+            
             # 根据GPU厂商设置常见的编码器
-            if 'nvidia' in primary_vendor:
+            if detected_vendor == 'nvidia' or 'nvidia' in primary_vendor:
                 self.config['encoder'] = 'h264_nvenc'
                 self.config['decoder'] = 'h264_cuvid'
                 self._set_nvidia_config()
                 logger.info(f"FFmpeg不可用，基于NVIDIA GPU设置默认编码器: {self.config['encoder']}")
-            elif 'amd' in primary_vendor:
+            elif detected_vendor == 'amd' or 'amd' in primary_vendor or 'radeon' in primary_vendor:
                 self.config['encoder'] = 'h264_amf'
                 self.config['decoder'] = ''
                 self._set_amd_config()
                 logger.info(f"FFmpeg不可用，基于AMD GPU设置默认编码器: {self.config['encoder']}")
-            elif 'intel' in primary_vendor:
+            elif detected_vendor == 'intel' or 'intel' in primary_vendor:
                 self.config['encoder'] = 'h264_qsv'
                 self.config['decoder'] = 'h264_qsv'
                 self._set_intel_config()
                 logger.info(f"FFmpeg不可用，基于Intel GPU设置默认编码器: {self.config['encoder']}")
             else:
-                # 未知GPU厂商，使用CPU编码
-                logger.info("未知GPU厂商，将使用CPU编码")
+                # 未知GPU厂商，尝试识别通用显卡
+                logger.info(f"未知GPU厂商: {primary_vendor}, 显卡: {primary_gpu}")
+                logger.info("尝试根据系统信息检测可能的GPU类型")
+                
+                # 尝试从其他来源获取信息
+                import platform
+                import subprocess
+                
+                try:
+                    # 在Windows上尝试使用dxdiag获取显卡信息
+                    if platform.system() == 'Windows':
+                        logger.info("尝试使用dxdiag获取GPU信息")
+                        temp_file = os.path.join(os.environ.get('TEMP', '.'), 'dxdiag_output.txt')
+                        subprocess.run(['dxdiag', '/t', temp_file], shell=True, timeout=10)
+                        
+                        if os.path.exists(temp_file):
+                            with open(temp_file, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read().lower()
+                                if 'nvidia' in content or 'geforce' in content:
+                                    self.config['encoder'] = 'h264_nvenc'
+                                    self.config['decoder'] = 'h264_cuvid'
+                                    self._set_nvidia_config()
+                                    logger.info("通过dxdiag检测到NVIDIA GPU")
+                                    self._save_config()
+                                    return True
+                                elif 'amd' in content or 'radeon' in content:
+                                    self.config['encoder'] = 'h264_amf'
+                                    self._set_amd_config()
+                                    logger.info("通过dxdiag检测到AMD GPU")
+                                    self._save_config()
+                                    return True
+                                elif 'intel' in content and ('graphics' in content or 'iris' in content):
+                                    self.config['encoder'] = 'h264_qsv'
+                                    self.config['decoder'] = 'h264_qsv'
+                                    self._set_intel_config()
+                                    logger.info("通过dxdiag检测到Intel集成显卡")
+                                    self._save_config()
+                                    return True
+                except Exception as e:
+                    logger.warning(f"使用dxdiag获取GPU信息失败: {str(e)}")
+                
+                # 如果所有检测都失败，使用CPU编码
+                logger.info("无法确定GPU类型，将使用CPU编码")
                 self._set_cpu_config()
                 return False
             
             # 保存配置
             self._save_config()
             
-            logger.info(f"已应用硬件加速配置: {primary_gpu} ({primary_vendor})")
+            logger.info(f"已应用硬件加速配置: {primary_gpu} ({self.config['detected_vendor']})")
             logger.info(f"使用编码器: {self.config['encoder']}")
             
             return True
         except Exception as e:
-            logger.error(f"在FFmpeg不可用的情况下配置硬件加速时出错: {e}")
+            logger.error(f"在FFmpeg不可用的情况下配置硬件加速时出错: {str(e)}")
+            logger.exception("详细错误信息:")
             self._set_cpu_config()
             return False
     

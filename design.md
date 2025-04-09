@@ -32,6 +32,7 @@ src/
 │   └── effects.py        # 各种转场效果实现
 ├── hardware/            # 硬件管理模块
 │   ├── __init__.py       # 模块初始化
+│   ├── gpu_config.py     # GPU配置管理
 │   └── system_analyzer.py # 系统分析器
 └── utils/              # 工具模块
     ├── __init__.py      # 模块初始化
@@ -51,6 +52,8 @@ graph TD
     A --> G[logger.py]
     C --> E
     D --> B
+    B --> H[gpu_config.py]
+    F --> H
 ```
 
 ## 模块详解
@@ -154,6 +157,170 @@ graph TD
   - 优先选择时长足够的视频，必要时可使用较短视频
   - 文件夹命名应符合排序规则，确保正确的段落顺序
 
+#### FFmpeg路径管理系统
+- **设计理念**: 灵活、容错、兼容多平台
+- **核心实现**:
+  ```python
+  def _get_ffmpeg_cmd(self):
+      """
+      获取FFmpeg命令路径
+      
+      Returns:
+          str: FFmpeg可执行文件路径
+      """
+      ffmpeg_cmd = "ffmpeg"  # 默认命令
+      
+      # 尝试从配置文件读取自定义路径
+      try:
+          project_root = Path(__file__).resolve().parent.parent.parent
+          ffmpeg_path_file = project_root / "ffmpeg_path.txt"
+          
+          if ffmpeg_path_file.exists():
+              with open(ffmpeg_path_file, 'r', encoding="utf-8") as f:
+                  custom_path = f.read().strip()
+                  if custom_path and os.path.exists(custom_path):
+                      # 在Windows处理中文路径
+                      if os.name == 'nt':
+                          import win32api
+                          custom_path = win32api.GetShortPathName(custom_path)
+                      ffmpeg_cmd = custom_path
+      except Exception as e:
+          logger.error(f"读取自定义FFmpeg路径时出错: {str(e)}")
+      
+      return ffmpeg_cmd
+  ```
+- **优化策略**:
+  - 灵活配置：支持通过外部文件配置FFmpeg路径
+  - 平台兼容：处理不同操作系统的路径差异
+  - 中文路径处理：在Windows系统下转换为短路径名，避免编码问题
+  - 异常处理：在读取配置失败时优雅降级，使用默认路径
+- **注意事项**:
+  - 在Windows系统中，中文路径可能导致FFmpeg调用失败
+  - 若用户没有管理员权限，可通过配置文件指定自定义FFmpeg路径
+  - 路径检测机制可确保选择有效的FFmpeg可执行文件
+
+#### GPU加速编码系统
+- **设计理念**: 自适应、兼容多种GPU、高性能与兼容性平衡
+- **核心实现**:
+  ```python
+  def _encode_with_ffmpeg(self, input_path, output_path, hardware_type="auto", codec="libx264"):
+      """
+      使用FFmpeg进行视频编码，支持硬件加速
+      
+      Args:
+          input_path: 输入文件路径
+          output_path: 输出文件路径
+          hardware_type: 硬件加速类型 (nvidia/intel/amd/auto/none)
+          codec: 视频编码器
+          
+      Returns:
+          bool: 编码是否成功
+      """
+      # 获取FFmpeg路径
+      ffmpeg_cmd = self._get_ffmpeg_cmd()
+      
+      # 根据硬件加速设置选择合适的编码器
+      if hardware_type != "none" and hardware_type != "":
+          if "nvidia" in hardware_type or "auto" == hardware_type:
+              codec = "h264_nvenc"
+          elif "intel" in hardware_type:
+              codec = "h264_qsv"
+          elif "amd" in hardware_type:
+              codec = "h264_amf"
+      
+      # 检查是否启用了兼容模式
+      compatibility_mode = True  # 默认启用兼容模式
+      try:
+          from hardware.gpu_config import GPUConfig
+          gpu_config = GPUConfig()
+          compatibility_mode = gpu_config.is_compatibility_mode_enabled()
+      except Exception as e:
+          logger.warning(f"读取GPU兼容模式设置时出错: {str(e)}，将使用默认兼容模式")
+      
+      # 根据不同GPU类型和兼容模式设置优化参数
+      if "nvenc" in codec:  # NVIDIA参数
+          if compatibility_mode:
+              gpu_params = [
+                  "-c:v", codec,
+                  "-preset", "p4",  # 兼容性好的预设
+                  "-b:v", f"{self.settings['bitrate']}k",
+                  "-spatial-aq", "1",
+                  "-temporal-aq", "1"
+              ]
+          else:
+              gpu_params = [
+                  "-c:v", codec,
+                  "-preset", "p2",
+                  "-tune", "hq",
+                  "-b:v", f"{self.settings['bitrate']}k",
+                  "-rc", "vbr",
+                  "-multipass", "2",
+                  "-spatial-aq", "1",
+                  "-temporal-aq", "1",
+                  "-cq", "19"
+              ]
+      else if codec == "h264_qsv":  # Intel参数
+          # Intel特定参数设置
+      else if codec == "h264_amf":  # AMD参数
+          # AMD特定参数设置
+      
+      # 执行编码并监控进度
+      # ... 略 ...
+  ```
+- **优化策略**:
+  - 自动适配：根据GPU类型自动选择最佳编码器
+  - 兼容模式：提供兼容较旧驱动的参数设置
+  - 实时监控：记录GPU状态、利用率及编码性能
+  - 参数优化：为不同GPU提供针对性的编码参数
+  - 错误处理：详细日志记录，便于调试编码问题
+- **进度监控实现**:
+  ```python
+  def progress_monitor():
+      """监控编码进度并更新UI"""
+      start_time = time.time()
+      while process.poll() is None and not self.stop_requested:
+          elapsed = time.time() - start_time
+          # 根据时间估算进度
+          progress = min(99, (elapsed / estimated_duration) * 100)
+          self.report_progress(f"正在导出视频... {progress:.1f}%", progress)
+          time.sleep(1)
+  
+  # 在单独线程中启动监控
+  monitor_thread = threading.Thread(target=progress_monitor)
+  monitor_thread.daemon = True
+  monitor_thread.start()
+  ```
+- **GPU状态监控**:
+  ```python
+  def _log_gpu_info(self, stage=""):
+      """记录GPU状态信息"""
+      try:
+          # 使用nvidia-smi命令获取GPU利用率
+          utilization_cmd = ["nvidia-smi", "--query-gpu=utilization.gpu,utilization.memory",
+                           "--format=csv,noheader,nounits"]
+          output = subprocess.check_output(utilization_cmd, universal_newlines=True)
+          
+          # 获取编码器会话信息
+          encoder_cmd = ["nvidia-smi", "--query-gpu=encoder.stats.sessionCount,encoder.stats.averageFps",
+                        "--format=csv,noheader,nounits"]
+          encoder_output = subprocess.check_output(encoder_cmd, universal_newlines=True)
+          
+          # 记录GPU状态
+          logger.info(f"GPU状态({stage}) - 利用率: {gpu_util}%, 显存: {mem_util}%, 编码会话: {session_count}, 帧率: {avg_fps} fps")
+      except Exception as e:
+          logger.debug(f"记录GPU信息时出错: {str(e)}")
+  ```
+- **编码器支持**:
+  - NVIDIA GPU: h264_nvenc/hevc_nvenc
+  - Intel GPU: h264_qsv/hevc_qsv
+  - AMD GPU: h264_amf/hevc_amf
+  - CPU: libx264/libx265 (无硬件加速时)
+- **注意事项**:
+  - 各硬件厂商的加速参数有较大差异
+  - 部分系统（如Windows远程桌面）对硬件加速支持有限制
+  - 需确保GPU驱动版本与FFmpeg版本兼容
+  - 编码过程消耗大量GPU资源，可能影响系统其他部分性能
+
 #### 转场效果系统 (src/transitions/effects.py)
 - **设计理念**: 模块化、可扩展、防重复
 - **核心实现**:
@@ -206,6 +373,78 @@ graph TD
   - 音高变化
   - 速度调整
   - 音频标准化
+
+### 硬件管理模块 (src/hardware/)
+
+#### GPU配置管理系统 (src/hardware/gpu_config.py)
+- **设计理念**: 自动检测、智能配置、最佳性能
+- **核心实现**:
+  ```python
+  class GPUConfig:
+      """GPU硬件加速配置管理类"""
+      
+      def __init__(self):
+          """初始化GPU配置类"""
+          # 默认配置与配置加载逻辑
+          
+      def detect_and_set_optimal_config(self):
+          """检测GPU并设置最优配置"""
+          
+      def _set_nvidia_config(self):
+          """设置NVIDIA GPU的特定配置"""
+          
+      def _set_amd_config(self):
+          """设置AMD GPU的特定配置"""
+          
+      def _set_intel_config(self):
+          """设置Intel GPU的特定配置"""
+      
+      def is_compatibility_mode_enabled(self):
+          """检查兼容模式是否启用"""
+  ```
+- **优化策略**:
+  - 自动识别：检测系统中可用的GPU并确定类型
+  - 智能配置：根据GPU类型和驱动版本选择最佳参数
+  - 兼容模式：为旧版驱动提供更保守的参数设置
+  - 持久化配置：将设置保存到配置文件，避免重复检测
+- **支持的GPU类型**:
+  - NVIDIA: GeForce系列、Quadro系列
+  - AMD: Radeon系列
+  - Intel: 集成显卡
+- **注意事项**:
+  - 远程桌面会话可能影响GPU检测
+  - 不同型号、驱动版本的GPU需要不同的参数设置
+  - 兼容模式可能降低性能但提高稳定性
+
+#### 系统分析模块 (src/hardware/system_analyzer.py)
+- **设计理念**: 全面、准确、低资源占用
+- **核心实现**:
+  ```python
+  class SystemAnalyzer:
+      """系统硬件分析器"""
+      
+      def analyze(self):
+          """分析系统硬件配置"""
+          
+      def get_optimal_settings(self):
+          """获取最优设置"""
+          
+      def _check_ffmpeg(self):
+          """检查FFmpeg可用性和支持的编码器"""
+          
+      def _analyze_gpu_capabilities(self, gpu):
+          """分析GPU的编解码能力"""
+          
+      def _analyze_ffmpeg_gpu_compatibility(self, gpu_info):
+          """分析FFmpeg与GPU的兼容性"""
+  ```
+- **检测范围**:
+  - CPU信息: 型号、核心数、频率
+  - GPU信息: 型号、显存、支持的硬件加速
+  - 内存信息: 总量、可用量
+  - 存储信息: 容量、剩余空间、读写速度
+  - 操作系统信息
+  - FFmpeg可用性与编码器支持检测
 
 ### 用户界面模块 (src/ui/main_window.py)
 
@@ -260,29 +499,6 @@ graph TD
   - 统一处理流: 使用通用方法处理所有拖拽操作
   - 全面日志: 记录每一步拖拽操作便于调试
 
-### 系统分析模块 (src/hardware/system_analyzer.py)
-
-#### 硬件检测系统
-- **设计理念**: 全面、准确、低资源占用
-- **核心实现**:
-  ```python
-  class SystemAnalyzer:
-      """系统硬件分析器"""
-      
-      def analyze(self):
-          """分析系统硬件配置"""
-          
-      def get_optimal_settings(self):
-          """获取最优设置"""
-  ```
-- **检测范围**:
-  - CPU信息: 型号、核心数、频率
-  - GPU信息: 型号、显存、支持的硬件加速
-  - 内存信息: 总量、可用量
-  - 存储信息: 容量、剩余空间、读写速度
-  - 操作系统信息
-  - FFmpeg可用性检测
-
 ## 关键实现
 
 ### 性能优化
@@ -298,6 +514,9 @@ graph TD
   - 自动检测可用GPU
   - 选择最优编码器
   - 动态调整线程数
+  - 兼容模式适配旧驱动
+  - 实时监控GPU利用率
+  - 多厂商GPU支持（NVIDIA/AMD/Intel）
 
 ### 错误处理
 - **异常恢复机制**:
@@ -308,12 +527,19 @@ graph TD
   - 详细错误提示
   - 进度实时更新
   - 操作状态同步
+- **FFmpeg问题处理**:
+  - 路径检测与优雅降级
+  - 编码器可用性验证
+  - 编码过程中断恢复
+  - 中文路径处理
 
 ### 视频文件处理最佳实践
 - **设计策略**:
   - 两阶段验证: 扩展名检查 + 需要时验证
   - 文件操作安全性: 使用临时文件并检查写入权限
   - 充分的错误处理: 每个文件操作都有异常捕获
+  - 视频编码优化: 根据内容自动选择合适的编码参数
+  - GPU加速流程: 检测 → 配置 → 监控 → 调优
 
 ## 扩展接口
 
@@ -358,6 +584,19 @@ graph TD
   - 保持UI响应: 在处理文件的同时更新界面
   - 统一处理流: 使用通用方法处理所有拖拽操作
   - 全面日志: 记录每一步拖拽操作便于调试
+
+### 硬件加速最佳实践
+- **设计理念**: 自适应、兼容性优先、性能优化
+- **实现技巧**:
+  - 动态检测: 运行时自动识别可用GPU
+  - 多级降级: 硬件不可用时有序降级到备选方案
+  - 参数持久化: 在配置文件中保存硬件加速设置
+  - 编码器验证: 确保选择的编码器在当前环境可用
+- **注意事项**:
+  - 远程会话兼容: 特别处理远程桌面环境下的GPU检测
+  - 驱动版本适配: 根据驱动版本选择兼容的编码参数
+  - 资源监控: 定期检查GPU使用率避免过载
+  - 编码质量平衡: 在性能和质量间寻找平衡点
 
 ### 部署建议
 - **环境配置**:
