@@ -317,11 +317,15 @@ class VideoProcessor:
         """
         扫描素材文件夹，获取视频和配音文件
         
+        支持两种导入模式：
+        1. 直接导入独立场景文件夹（原有模式）
+        2. 导入父文件夹，从中提取按顺序排列的子文件夹作为场景（新模式）
+        
         Args:
             material_folders: 素材文件夹信息列表
             
         Returns:
-            Dict[str, Dict[str, Any]]: 素材数据
+            Dict[str, Dict[str, Any]]: 素材数据，按子文件夹顺序排列
         """
         material_data = {}
         
@@ -334,97 +338,153 @@ class VideoProcessor:
             
             self.report_progress(f"正在扫描素材文件夹: {folder_name}", 1 + progress_per_folder * idx)
             
-            # 初始化素材数据
-            material_data[folder_name] = {
-                "videos": [],
-                "audios": [],
-                "path": folder_path
-            }
+            # 检测是否为父文件夹导入模式（检查是否包含子文件夹）
+            is_parent_folder = False
+            sub_folders = []
             
-            # 查找视频文件夹
-            video_folder = os.path.join(folder_path, "视频")
-            if os.path.exists(video_folder) and os.path.isdir(video_folder):
-                # 获取所有视频文件
-                video_files = []
-                for root, _, files in os.walk(video_folder):
-                    for file in files:
-                        if file.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".wmv")):
-                            video_files.append(os.path.join(root, file))
-                
-                # 分析视频时长
-                video_info_list = []
-                for video_file in video_files:
-                    try:
-                        # 使用OpenCV获取视频信息
-                        cap = cv2.VideoCapture(video_file)
-                        if not cap.isOpened():
-                            logger.warning(f"无法打开视频: {video_file}")
-                            continue
-                        
-                        # 获取视频帧率和总帧数
-                        fps = cap.get(cv2.CAP_PROP_FPS)
-                        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                        
-                        # 计算视频时长(秒)
-                        duration = frame_count / fps if fps > 0 else 0
-                        
-                        # 获取分辨率
-                        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        
-                        cap.release()
-                        
-                        if duration > 0:
-                            video_info = {
-                                "path": video_file,
-                                "duration": duration,
-                                "fps": fps,
-                                "width": width,
-                                "height": height
-                            }
-                            video_info_list.append(video_info)
-                    except Exception as e:
-                        logger.warning(f"分析视频失败: {video_file}, 错误: {str(e)}")
-                
-                material_data[folder_name]["videos"] = video_info_list
-                logger.info(f"文件夹 '{folder_name}' 中找到 {len(video_info_list)} 个视频")
-            else:
-                logger.warning(f"文件夹 '{folder_name}' 中找不到视频文件夹")
+            # 获取子文件夹列表
+            for item in os.listdir(folder_path):
+                item_path = os.path.join(folder_path, item)
+                if os.path.isdir(item_path):
+                    # 检查子文件夹是否包含标准结构（视频文件夹或配音文件夹）
+                    video_dir = os.path.join(item_path, "视频")
+                    audio_dir = os.path.join(item_path, "配音")
+                    if os.path.isdir(video_dir) or os.path.isdir(audio_dir):
+                        sub_folders.append(item_path)
             
-            # 查找配音文件夹
-            audio_folder = os.path.join(folder_path, "配音")
-            if os.path.exists(audio_folder) and os.path.isdir(audio_folder):
-                # 获取所有音频文件
-                audio_files = []
-                for root, _, files in os.walk(audio_folder):
-                    for file in files:
-                        if file.lower().endswith((".mp3", ".wav", ".aac", ".ogg", ".flac")):
-                            audio_files.append(os.path.join(root, file))
+            # 如果找到符合条件的子文件夹，认为是父文件夹导入模式
+            if sub_folders:
+                is_parent_folder = True
+                logger.info(f"检测到父文件夹导入模式，找到 {len(sub_folders)} 个子文件夹")
                 
-                # 分析音频时长
-                audio_info_list = []
-                for audio_file in audio_files:
-                    try:
-                        # 使用MoviePy获取音频信息
-                        audio_clip = AudioFileClip(audio_file)
-                        duration = audio_clip.duration
-                        audio_clip.close()
-                        
-                        if duration > 0:
-                            audio_info = {
-                                "path": audio_file,
-                                "duration": duration
-                            }
-                            audio_info_list.append(audio_info)
-                    except Exception as e:
-                        logger.warning(f"分析音频失败: {audio_file}, 错误: {str(e)}")
+                # 对子文件夹按名称排序，确保按正确顺序处理
+                sub_folders.sort()
                 
-                material_data[folder_name]["audios"] = audio_info_list
-                logger.info(f"文件夹 '{folder_name}' 中找到 {len(audio_info_list)} 个配音")
+                # 逐个处理子文件夹
+                for sub_idx, sub_path in enumerate(sub_folders):
+                    sub_name = os.path.basename(sub_path)
+                    self.report_progress(f"扫描段落 {sub_idx+1}/{len(sub_folders)}: {sub_name}", 
+                                      1 + progress_per_folder * idx + (progress_per_folder * sub_idx / len(sub_folders)))
+                    
+                    # 使用顺序编号作为键，确保段落按顺序排列
+                    segment_key = f"{sub_idx+1:02d}_{sub_name}"
+                    
+                    # 初始化段落数据
+                    material_data[segment_key] = {
+                        "videos": [],
+                        "audios": [],
+                        "path": sub_path,
+                        "segment_index": sub_idx,  # 存储段落索引，用于排序
+                        "parent_folder": folder_name  # 记录所属父文件夹
+                    }
+                    
+                    # 扫描视频文件夹
+                    self._scan_media_folder(sub_path, segment_key, material_data)
             else:
-                logger.warning(f"文件夹 '{folder_name}' 中找不到配音文件夹")
+                # 原始模式：直接扫描所提供的文件夹
+                # 初始化素材数据
+                material_data[folder_name] = {
+                    "videos": [],
+                    "audios": [],
+                    "path": folder_path
+                }
+                
+                # 扫描视频文件夹
+                self._scan_media_folder(folder_path, folder_name, material_data)
         
         return material_data
+    
+    def _scan_media_folder(self, folder_path: str, folder_key: str, material_data: Dict[str, Dict[str, Any]]):
+        """
+        扫描指定文件夹的媒体文件
+        
+        Args:
+            folder_path: 文件夹路径
+            folder_key: 素材数据字典中的键
+            material_data: 素材数据字典
+        """
+        # 查找视频文件夹
+        video_folder = os.path.join(folder_path, "视频")
+        if os.path.exists(video_folder) and os.path.isdir(video_folder):
+            # 获取所有视频文件
+            video_files = []
+            for root, _, files in os.walk(video_folder):
+                for file in files:
+                    if file.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".wmv")):
+                        video_files.append(os.path.join(root, file))
+            
+            # 分析视频时长
+            video_info_list = []
+            for video_file in video_files:
+                try:
+                    # 使用OpenCV获取视频信息
+                    cap = cv2.VideoCapture(video_file)
+                    if not cap.isOpened():
+                        logger.warning(f"无法打开视频: {video_file}")
+                        continue
+                    
+                    # 获取视频帧率和总帧数
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    
+                    # 计算视频时长(秒)
+                    duration = frame_count / fps if fps > 0 else 0
+                    
+                    # 获取分辨率
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    
+                    cap.release()
+                    
+                    if duration > 0:
+                        video_info = {
+                            "path": video_file,
+                            "duration": duration,
+                            "fps": fps,
+                            "width": width,
+                            "height": height
+                        }
+                        video_info_list.append(video_info)
+                except Exception as e:
+                    logger.warning(f"分析视频失败: {video_file}, 错误: {str(e)}")
+            
+            material_data[folder_key]["videos"] = video_info_list
+            logger.info(f"文件夹 '{folder_key}' 中找到 {len(video_info_list)} 个视频")
+        else:
+            logger.warning(f"文件夹 '{folder_key}' 中找不到视频文件夹")
+        
+        # 查找配音文件夹
+        audio_folder = os.path.join(folder_path, "配音")
+        if os.path.exists(audio_folder) and os.path.isdir(audio_folder):
+            # 获取所有音频文件
+            audio_files = []
+            for root, _, files in os.walk(audio_folder):
+                for file in files:
+                    if file.lower().endswith((".mp3", ".wav", ".aac", ".ogg", ".flac")):
+                        audio_files.append(os.path.join(root, file))
+            
+            # 分析音频时长
+            audio_info_list = []
+            for audio_file in audio_files:
+                try:
+                    # 使用MoviePy获取音频信息
+                    audio_clip = AudioFileClip(audio_file)
+                    duration = audio_clip.duration
+                    audio_clip.close()
+                    
+                    if duration > 0:
+                        audio_info = {
+                            "path": audio_file,
+                            "duration": duration
+                        }
+                        audio_info_list.append(audio_info)
+                except Exception as e:
+                    logger.warning(f"分析音频失败: {audio_file}, 错误: {str(e)}")
+            
+            material_data[folder_key]["audios"] = audio_info_list
+            logger.info(f"文件夹 '{folder_key}' 中找到 {len(audio_info_list)} 个配音")
+        else:
+            logger.warning(f"文件夹 '{folder_key}' 中找不到配音文件夹")
     
     def _process_single_video(self, 
                               material_data: Dict[str, Dict[str, Any]], 
@@ -454,16 +514,30 @@ class VideoProcessor:
         # 计算进度范围
         progress_range = progress_end - progress_start
         
-        # 使用所有提供的场景，保持原始顺序
-        folders = list(material_data.keys())
+        # 保持段落顺序
+        # 检查是否有段落索引，如果有则按段落索引排序
+        folders = []
+        has_segment_structure = False
         
-        # 确保至少有2个场景
-        if len(folders) < 2:
-            logger.warning(f"可用场景数量少于2个，将使用所有 {len(folders)} 个场景")
-            if len(folders) == 0:
-                error_msg = "没有可用的场景，无法生成视频"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
+        for key, data in material_data.items():
+            if "segment_index" in data:
+                has_segment_structure = True
+                break
+        
+        if has_segment_structure:
+            # 按段落索引排序
+            folders = sorted(material_data.keys(), 
+                            key=lambda k: material_data[k].get("segment_index", 0))
+            logger.info("检测到分段结构，将按段落顺序处理视频")
+        else:
+            # 使用原始顺序
+            folders = list(material_data.keys())
+        
+        # 确保至少有1个场景
+        if len(folders) == 0:
+            error_msg = "没有可用的场景，无法生成视频"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         # 使用所有场景，保持原始顺序
         selected_folders = folders
@@ -514,21 +588,30 @@ class VideoProcessor:
                 # 如果没有足够长的视频，尝试使用最长的
                 if not suitable_videos and videos:
                     suitable_videos = sorted(videos, key=lambda v: v["duration"], reverse=True)
+                    if suitable_videos[0]["path"] in used_videos:
+                        # 如果最长的已经使用过，尝试找其他未使用的
+                        unused_videos = [v for v in videos if v["path"] not in used_videos]
+                        if unused_videos:
+                            suitable_videos = sorted(unused_videos, key=lambda v: v["duration"], reverse=True)
+                        else:
+                            logger.warning(f"场景 '{folder_name}' 的所有视频都已使用，将重复使用")
+                            suitable_videos = sorted(videos, key=lambda v: v["duration"], reverse=True)
                     logger.warning(f"没有找到时长大于 {audio_duration:.2f}秒 的视频，将使用最长的视频: {suitable_videos[0]['duration']:.2f}秒")
                 
                 if not suitable_videos:
                     logger.warning(f"场景 '{folder_name}' 没有合适的视频，跳过")
                     continue
                 
-                # 选择第一个符合条件的视频
-                video_info = suitable_videos[0]
+                # 随机选择一个符合条件的视频，而不是总是选第一个
+                import random
+                video_info = random.choice(suitable_videos)
                 video_file = video_info["path"]
                 video_duration = video_info["duration"]
                 
                 # 记录已使用的视频
                 used_videos.add(video_file)
                 
-                logger.info(f"选择视频: {os.path.basename(video_file)}, 时长: {video_duration:.2f}秒")
+                logger.info(f"随机选择视频: {os.path.basename(video_file)}, 时长: {video_duration:.2f}秒")
                 
                 try:
                     # 加载视频剪辑
