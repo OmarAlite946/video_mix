@@ -192,111 +192,27 @@ class VideoProcessor:
         批量处理视频
         
         Args:
-            material_folders: 素材文件夹列表，每个文件夹包含视频和配音
+            material_folders: 素材文件夹信息列表
             output_dir: 输出目录
-            count: 生成的视频数量
+            count: 要生成的视频数量
             bgm_path: 背景音乐路径
             
         Returns:
             List[str]: 生成的视频文件路径列表
         """
-        # 检查FFmpeg是否可用
-        if not self._check_ffmpeg():
-            raise RuntimeError("FFmpeg不可用，无法处理视频")
-        
-        # 记录处理开始
-        logger.info(f"开始批量处理视频，生成数量: {count}")
-        logger.info(f"素材文件夹数量: {len(material_folders)}")
-        logger.info(f"输出目录: {output_dir}")
-        
-        # 检查硬件加速配置
-        if self.settings.get("hardware_accel", "none") != "none":
-            # 记录GPU信息
-            logger.info(f"已启用硬件加速: {self.settings.get('hardware_accel')} - 编码器: {self.settings.get('encoder', 'libx264')}")
-            try:
-                # 检查NVIDIA GPU状态
-                if "nvenc" in self.settings.get("encoder", "").lower() or "nvidia" in self.settings.get("encoder", "").lower():
-                    self._log_gpu_info("处理开始前")
-            except Exception as e:
-                logger.warning(f"检查GPU状态时出错: {e}")
-        else:
-            logger.info(f"使用CPU处理: 编码器 - {self.settings.get('encoder', 'libx264')}")
-        
-        # 检查中断标志并重置
         self.stop_requested = False
+        output_videos = []
         
-        if not material_folders:
-            error_msg = "没有可用的素材文件夹，请先添加素材"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-            
-        # 检查素材文件是否存在
-        for folder_info in material_folders:
-            folder_path = folder_info.get("path", "")
-            if not os.path.exists(folder_path):
-                error_msg = f"素材文件夹不存在: {folder_path}"
-                logger.error(error_msg)
-                raise FileNotFoundError(error_msg)
+        # 扫描素材文件夹
+        self.report_progress("开始扫描素材文件夹...", 0)
         
-        # 检查输出目录
-        if not output_dir:
-            error_msg = "未指定输出目录"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-            
-        # 尝试创建输出目录并检查权限
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-            # 测试写入权限
-            test_file = os.path.join(output_dir, ".write_test")
-            with open(test_file, 'w') as f:
-                f.write("test")
-            os.remove(test_file)
-        except PermissionError:
-            error_msg = f"没有写入输出目录的权限: {output_dir}"
-            logger.error(error_msg)
-            raise PermissionError(error_msg)
-        except Exception as e:
-            error_msg = f"创建或访问输出目录时出错: {output_dir}, 错误: {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-        
-        # 检查背景音乐
-        if bgm_path and not os.path.exists(bgm_path):
-            warning_msg = f"背景音乐文件不存在: {bgm_path}，将不使用背景音乐"
-            logger.warning(warning_msg)
-            bgm_path = None
-        
-        # 扫描素材文件夹前检查硬件状态
-        try:
-            # 记录系统基本信息
-            import psutil
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory()
-            disk = psutil.disk_usage(output_dir)
-            
-            if memory.percent > 90:
-                logger.warning(f"系统内存使用率较高 ({memory.percent}%)，可能影响处理性能")
-                
-            if disk.percent > 90:
-                logger.warning(f"输出目录所在磁盘空间不足 ({disk.percent}% 已使用)，请确保有足够空间")
-                
-            if self.settings["hardware_accel"] != "none" and self.settings["hardware_accel"] != "auto":
-                logger.info(f"使用硬件加速: {self.settings['hardware_accel']}")
-        except Exception as e:
-            logger.warning(f"检查系统状态时出错: {str(e)}")
-        
-        self.report_progress("正在扫描素材文件夹...", 0)
-        
-        # 扫描素材文件夹，获取视频和配音文件
         try:
             material_data = self._scan_material_folders(material_folders)
         except Exception as e:
-            error_msg = f"扫描素材文件夹失败: {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
+            logger.error(f"扫描素材文件夹失败: {str(e)}")
+            raise
         
-        # 检查是否有可用素材
+        # 检查是否找到素材
         if not material_data:
             error_msg = "没有找到可用的素材文件"
             logger.error(error_msg)
@@ -315,14 +231,40 @@ class VideoProcessor:
         # 计算每个视频的进度百分比
         progress_per_video = 90.0 / count if count > 0 else 0
         
+        # 添加当前时间戳到文件名，避免覆盖之前的文件
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        
+        # 查找目录中已有的同类型文件，确定起始序号
+        existing_files = [f for f in os.listdir(output_dir) if f.startswith("合成视频_") and f.endswith(".mp4")]
+        start_index = 1
+        
+        # 如果有现有文件，找出最大序号并加1
+        if existing_files:
+            try:
+                # 尝试从文件名中提取序号
+                indices = []
+                for f in existing_files:
+                    # 匹配 "合成视频_NUMBER.mp4" 或 "合成视频_TIMESTAMP_NUMBER.mp4" 格式
+                    match = re.search(r'合成视频_(?:[\d_]+_)?(\d+)\.mp4$', f)
+                    if match:
+                        indices.append(int(match.group(1)))
+                
+                if indices:
+                    start_index = max(indices) + 1
+            except Exception as e:
+                logger.warning(f"确定起始序号时出错: {str(e)}，将使用默认序号")
+        
+        logger.info(f"视频生成将从序号 {start_index} 开始")
+        
         for i in range(count):
             if self.stop_requested:
                 logger.info("收到停止请求，中断视频合成")
                 break
                 
             try:
-                # 生成单个视频
-                output_path = os.path.join(output_dir, f"合成视频_{i+1}.mp4")
+                # 生成带时间戳的文件名，避免覆盖之前的文件
+                file_index = start_index + i
+                output_path = os.path.join(output_dir, f"合成视频_{timestamp}_{file_index}.mp4")
                 self.report_progress(f"正在生成视频 {i+1}/{count}", 5 + progress_per_video * i)
                 
                 self._process_single_video(
