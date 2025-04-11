@@ -26,6 +26,9 @@ from utils.file_utils import list_media_files
 from hardware.system_analyzer import SystemAnalyzer
 from hardware.gpu_config import GPUConfig
 
+# 导入缓存配置模块
+from utils.cache_config import CacheConfig
+
 # 设置日志
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,9 @@ class MainWindow(QMainWindow):
         # 初始化GPU配置
         self.gpu_config = GPUConfig()
         self.gpu_info = {}  # 存储GPU信息
+        
+        # 初始化缓存配置
+        self.cache_config = CacheConfig()
         
         # 初始化界面
         self._init_ui()
@@ -184,6 +190,22 @@ class MainWindow(QMainWindow):
         save_dir_layout.addWidget(self.btn_open_save_dir)
         
         settings_layout.addRow(save_dir_layout)
+        
+        # 缓存目录
+        cache_dir_layout = QHBoxLayout()
+        self.edit_cache_dir = QLineEdit()
+        self.edit_cache_dir.setText(self.cache_config.get_cache_dir())
+        self.btn_browse_cache_dir = QPushButton("选择")
+        self.btn_open_cache_dir = QPushButton("打开")
+        self.btn_clear_cache = QPushButton("清理缓存")
+        
+        cache_dir_layout.addWidget(QLabel("缓存目录:"))
+        cache_dir_layout.addWidget(self.edit_cache_dir)
+        cache_dir_layout.addWidget(self.btn_browse_cache_dir)
+        cache_dir_layout.addWidget(self.btn_open_cache_dir)
+        cache_dir_layout.addWidget(self.btn_clear_cache)
+        
+        settings_layout.addRow(cache_dir_layout)
         
         # 音量设置
         volume_layout = QHBoxLayout()
@@ -393,6 +415,11 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 背景音乐
         self.btn_browse_bgm.clicked.connect(self.on_browse_bgm)
         self.btn_play_bgm.clicked.connect(self.on_play_bgm)
+        
+        # 缓存目录
+        self.btn_browse_cache_dir.clicked.connect(self.on_browse_cache_dir)
+        self.btn_open_cache_dir.clicked.connect(self.on_open_cache_dir)
+        self.btn_clear_cache.clicked.connect(self.on_clear_cache)
         
         # GPU检测
         self.btn_detect_gpu.clicked.connect(self.detect_gpu)
@@ -1138,7 +1165,8 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 "bgm_volume": params["bgm_volume"],
                 "transition": params["transition"].lower(),
                 "transition_duration": 0.5,  # 默认转场时长
-                "threads": 4  # 默认线程数
+                "threads": 4,  # 默认线程数
+                "temp_dir": self.cache_config.get_cache_dir()  # 使用缓存配置的目录
             }
             
             # 更新状态栏
@@ -2187,3 +2215,90 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         else:
             self.status_label.setText("更改兼容模式设置需要先检测到NVIDIA显卡")
             logging.warning("更改兼容模式失败：未检测到NVIDIA显卡")
+
+    @pyqtSlot()
+    def on_browse_cache_dir(self):
+        """选择缓存目录"""
+        current_dir = self.edit_cache_dir.text()
+        if not current_dir or not os.path.exists(current_dir):
+            current_dir = os.path.expanduser("~")
+        
+        cache_dir = QFileDialog.getExistingDirectory(
+            self, "选择缓存目录", current_dir
+        )
+        
+        if cache_dir:
+            success = self.cache_config.set_cache_dir(cache_dir)
+            if success:
+                self.edit_cache_dir.setText(cache_dir)
+                QMessageBox.information(
+                    self, 
+                    "设置成功", 
+                    f"缓存目录已更改为：\n{cache_dir}\n\n新的缓存设置将在重启软件后生效。"
+                )
+            else:
+                QMessageBox.warning(
+                    self, 
+                    "设置失败", 
+                    "无法设置缓存目录，请确保选择的目录具有写权限。"
+                )
+
+    @pyqtSlot()
+    def on_open_cache_dir(self):
+        """打开缓存目录"""
+        cache_dir = self.edit_cache_dir.text()
+        
+        if not cache_dir or not os.path.exists(cache_dir):
+            QMessageBox.warning(self, "目录不存在", "缓存目录不存在，请先设置有效的缓存目录。")
+            return
+        
+        try:
+            if sys.platform == 'win32':
+                os.startfile(cache_dir)
+            elif sys.platform == 'darwin':  # macOS
+                subprocess.run(['open', cache_dir])
+            else:  # Linux
+                subprocess.run(['xdg-open', cache_dir])
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"无法打开缓存目录：{str(e)}")
+
+    @pyqtSlot()
+    def on_clear_cache(self):
+        """清理缓存目录"""
+        reply = QMessageBox.question(
+            self, 
+            "确认清理缓存", 
+            "是否清理缓存目录中的所有文件？\n\n这将删除所有临时文件，但不会影响项目文件。",
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        cache_dir = self.edit_cache_dir.text()
+        
+        if not cache_dir or not os.path.exists(cache_dir):
+            QMessageBox.warning(self, "目录不存在", "缓存目录不存在，无法清理。")
+            return
+        
+        try:
+            # 清理缓存文件但保留目录
+            count = 0
+            for file in os.listdir(cache_dir):
+                file_path = os.path.join(cache_dir, file)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    count += 1
+            
+            QMessageBox.information(
+                self, 
+                "清理完成", 
+                f"已清理 {count} 个缓存文件。"
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self, 
+                "清理失败", 
+                f"清理缓存文件时出错：{str(e)}"
+            )

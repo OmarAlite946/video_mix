@@ -22,6 +22,7 @@ except ImportError as e:
     raise ImportError(f"请安装必要的依赖: {e}")
 
 from utils.logger import get_logger
+from utils.cache_config import CacheConfig
 
 logger = get_logger()
 
@@ -35,6 +36,10 @@ class AudioProcessor:
         Args:
             settings: 音频处理设置
         """
+        # 获取缓存配置
+        cache_config = CacheConfig()
+        cache_dir = cache_config.get_cache_dir()
+        
         # 默认设置
         self.default_settings = {
             "sample_rate": 44100,        # 采样率
@@ -44,7 +49,7 @@ class AudioProcessor:
             "bgm_volume": 0.5,           # 背景音乐音量
             "fade_in": 0.5,              # 淡入时长(秒)
             "fade_out": 1.0,             # 淡出时长(秒)
-            "temp_dir": Path.home() / "VideoMixTool" / "temp"  # 临时文件目录
+            "temp_dir": cache_dir       # 使用配置的缓存目录
         }
         
         # 更新设置

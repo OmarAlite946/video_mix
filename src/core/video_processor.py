@@ -26,6 +26,7 @@ except ImportError as e:
     raise ImportError(f"请安装必要的依赖: {e}")
 
 from utils.logger import get_logger
+from utils.cache_config import CacheConfig
 
 logger = get_logger()
 
@@ -40,6 +41,10 @@ class VideoProcessor:
             settings: 处理设置参数
             progress_callback: 进度回调函数，参数为(状态消息, 进度百分比)
         """
+        # 获取缓存配置
+        cache_config = CacheConfig()
+        cache_dir = cache_config.get_cache_dir()
+        
         # 默认设置
         self.default_settings = {
             "hardware_accel": "auto",  # 硬件加速：auto, cuda, qsv, amf, none
@@ -52,7 +57,7 @@ class VideoProcessor:
             "voice_volume": 1.0,        # 配音音量
             "bgm_volume": 0.5,          # 背景音乐音量
             "output_format": "mp4",     # 输出格式
-            "temp_dir": Path.home() / "VideoMixTool" / "temp"  # 临时文件目录
+            "temp_dir": cache_dir  # 使用配置的缓存目录
         }
         
         # 更新设置
