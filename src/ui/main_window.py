@@ -1109,6 +1109,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         return params
 
     def process_videos(self):
+        """在独立线程中执行视频合成"""
         try:
             from core.video_processor import VideoProcessor
             
@@ -1124,7 +1125,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                     "path": self.video_table.item(row, 2).text()
                 }
                 material_folders.append(folder_info)
-                
+            
             # 使用GPU配置
             hardware_accel = False
             encoder = "libx264"
@@ -1182,13 +1183,16 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             bgm_path = params["bgm_path"] if os.path.exists(params["bgm_path"]) else None
             count = params["generate_count"]
             
-            # 实际生成视频
-            output_videos = self.processor.process_batch(
+            # 实际生成视频，注意现在返回值是一个元组(视频列表, 总时长)
+            result = self.processor.process_batch(
                 material_folders=material_folders,
                 output_dir=save_dir,
                 count=count,
                 bgm_path=bgm_path
             )
+            
+            # 解包结果
+            output_videos, total_time = result
             
             # 处理完成
             QtCore.QMetaObject.invokeMethod(
@@ -1197,7 +1201,8 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(bool, len(output_videos) > 0),
                 QtCore.Q_ARG(int, len(output_videos)),
-                QtCore.Q_ARG(str, save_dir)
+                QtCore.Q_ARG(str, save_dir),
+                QtCore.Q_ARG(str, total_time)
             )
         except InterruptedError:
             # 处理被用户中断
@@ -1297,15 +1302,15 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 显示消息
         QMessageBox.information(self, "合成已中止", "视频合成任务已被中止")
     
-    @QtCore.pyqtSlot(bool, int, str)
-    def on_compose_completed(self, success=True, count=0, output_dir=""):
+    @QtCore.pyqtSlot(bool, int, str, str)
+    def on_compose_completed(self, success=True, count=0, output_dir="", total_time=""):
         """合成完成时调用"""
         # 更新界面状态
         self.btn_start_compose.setEnabled(True)
         self.btn_stop_compose.setEnabled(False)
         
         if success and count > 0:
-            self.label_progress.setText(f"合成进度: 已完成 {count} 个视频")
+            self.label_progress.setText(f"合成进度: 已完成 {count} 个视频，用时: {total_time}")
         
             # 设置表格中素材的状态为"已完成"
             for row in range(self.video_table.rowCount()):
@@ -1314,7 +1319,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             QMessageBox.information(
                 self, 
                 "合成完成", 
-                f"视频合成任务已完成！成功生成 {count} 个视频，保存在：\n{output_dir}"
+                f"视频合成任务已完成！\n共合成 {count} 个视频，用时 {total_time}\n\n保存在：\n{output_dir}"
             )
         else:
             self.label_progress.setText("合成进度: 未生成视频")

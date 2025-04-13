@@ -721,3 +721,100 @@ if video_duration > clip_duration:
 - 注意事项: 
   * 编码模式选择：对于需要快速生成视频的场景，建议使用快速不重编码模式
   * 特效兼容性：使用复杂转场特效时，建议使用重编码模式以确保效果正确
+
+@design.md 目标路径: src/core/video_processor.py 操作类型: 补充 更新内容: 
+- 设计理念: 
+  * 添加处理计时功能，帮助用户了解视频处理效率
+- 核心实现: 
+  ```python
+  # 在初始化中添加计时变量
+  self.start_time = 0
+  
+  # 添加时间格式化函数
+  def _format_time(self, seconds):
+      """将秒数格式化为时:分:秒格式"""
+      hours = int(seconds // 3600)
+      minutes = int((seconds % 3600) // 60)
+      seconds = int(seconds % 60)
+      return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+  
+  # 修改进度报告函数，增加时间显示
+  def report_progress(self, message: str, percent: float):
+      if self.progress_callback:
+          try:
+              # 如果处理已经开始，添加已用时间
+              if self.start_time > 0:
+                  elapsed_time = time.time() - self.start_time
+                  elapsed_str = self._format_time(elapsed_time)
+                  message = f"{message} (已用时: {elapsed_str})"
+              
+              self.progress_callback(message, percent)
+          except Exception as e:
+              logger.error(f"调用进度回调时出错: {str(e)}")
+  
+  # 修改批处理函数，添加计时并返回总时长
+  def process_batch(self, material_folders, output_dir, count=1, bgm_path=None) -> Tuple[List[str], str]:
+      self.start_time = time.time()  # 开始计时
+      
+      # 处理完成后计算总用时
+      total_time = time.time() - self.start_time
+      total_time_str = self._format_time(total_time)
+      
+      return output_videos, total_time_str  # 返回视频列表和总用时
+  ```
+- 优化策略: 
+  * 实时显示：在进度信息中实时显示已用时间，让用户了解处理进度
+  * 总结统计：在处理完成后提供总用时统计，便于用户评估效率
+  * 格式化显示：使用标准时:分:秒格式显示时间，易于理解
+- 注意事项: 
+  * 计时精度：秒级计时足够满足视频处理时间统计需求
+  * 实时更新：每次进度更新时同步更新已用时间
+  * 处理中断：即使处理被中断，也能正确显示已用时间
+
+@design.md 目标路径: src/ui/main_window.py 操作类型: 补充 更新内容: 
+- 设计理念: 
+  * 在UI界面中展示视频处理用时信息
+- 核心实现: 
+  ```python
+  # 更新处理函数以接收并处理时间信息
+  def process_videos(self):
+      # 处理视频并获取结果
+      result = self.processor.process_batch(
+          material_folders=material_folders,
+          output_dir=save_dir,
+          count=count,
+          bgm_path=bgm_path
+      )
+      
+      # 解包结果获取视频列表和总时长
+      output_videos, total_time = result
+      
+      # 将总时长传递给完成处理函数
+      QtCore.QMetaObject.invokeMethod(
+          self, 
+          "on_compose_completed", 
+          QtCore.Qt.QueuedConnection,
+          QtCore.Q_ARG(bool, len(output_videos) > 0),
+          QtCore.Q_ARG(int, len(output_videos)),
+          QtCore.Q_ARG(str, save_dir),
+          QtCore.Q_ARG(str, total_time)  # 添加总时长参数
+      )
+  
+  # 更新完成处理函数以显示时间信息
+  @QtCore.pyqtSlot(bool, int, str, str)
+  def on_compose_completed(self, success=True, count=0, output_dir="", total_time=""):
+      if success and count > 0:
+          self.label_progress.setText(f"合成进度: 已完成 {count} 个视频，用时: {total_time}")
+          
+          QMessageBox.information(
+              self, 
+              "合成完成", 
+              f"视频合成任务已完成！\n共合成 {count} 个视频，用时 {total_time}\n\n保存在：\n{output_dir}"
+          )
+  ```
+- 优化策略: 
+  * 进度条展示：在进度条附近显示已用时间，提供直观反馈
+  * 完成弹窗：在合成完成弹窗中显示总时长，便于用户了解整体效率
+- 注意事项: 
+  * 信号槽传递：通过Qt信号槽机制传递时间信息，保持UI响应性
+  * 跨线程安全：确保时间信息在正确的线程中更新和显示

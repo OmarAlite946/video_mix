@@ -77,6 +77,9 @@ class VideoProcessor:
         # 停止标志
         self.stop_requested = False
         
+        # 处理计时
+        self.start_time = 0
+        
         # 检查FFmpeg是否可用
         self._check_ffmpeg()
     
@@ -169,6 +172,21 @@ class VideoProcessor:
             logger.error(f"检查FFmpeg时出错: {str(e)}, 类型: {type(e).__name__}")
             return False
     
+    def _format_time(self, seconds):
+        """
+        将秒数格式化为时:分:秒格式
+        
+        Args:
+            seconds: 秒数
+            
+        Returns:
+            str: 格式化后的时间字符串 (HH:MM:SS)
+        """
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
     def report_progress(self, message: str, percent: float):
         """
         报告进度
@@ -179,6 +197,12 @@ class VideoProcessor:
         """
         if self.progress_callback:
             try:
+                # 如果处理已经开始，添加已用时间
+                if self.start_time > 0:
+                    elapsed_time = time.time() - self.start_time
+                    elapsed_str = self._format_time(elapsed_time)
+                    message = f"{message} (已用时: {elapsed_str})"
+                
                 # 进度更新应该在主线程中进行
                 # 这个回调通常是通过Qt的信号槽机制连接的，
                 # 它会自动处理跨线程调用
@@ -192,7 +216,7 @@ class VideoProcessor:
                       material_folders: List[Dict[str, Any]], 
                       output_dir: str, 
                       count: int = 1, 
-                      bgm_path: str = None) -> List[str]:
+                      bgm_path: str = None) -> Tuple[List[str], str]:
         """
         批量处理视频
         
@@ -203,10 +227,13 @@ class VideoProcessor:
             bgm_path: 背景音乐路径
             
         Returns:
-            List[str]: 生成的视频文件路径列表
+            Tuple[List[str], str]: 生成的视频文件路径列表和总用时
         """
         self.stop_requested = False
         output_videos = []
+        
+        # 开始计时
+        self.start_time = time.time()
         
         # 扫描素材文件夹
         self.report_progress("开始扫描素材文件夹...", 0)
@@ -239,69 +266,47 @@ class VideoProcessor:
         # 添加当前时间戳到文件名，避免覆盖之前的文件
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         
-        # 查找目录中已有的同类型文件，确定起始序号
-        existing_files = [f for f in os.listdir(output_dir) if f.startswith("合成视频_") and f.endswith(".mp4")]
-        start_index = 1
-        
-        # 如果有现有文件，找出最大序号并加1
-        if existing_files:
-            try:
-                # 尝试从文件名中提取序号
-                indices = []
-                for f in existing_files:
-                    # 匹配 "合成视频_NUMBER.mp4" 或 "合成视频_TIMESTAMP_NUMBER.mp4" 格式
-                    match = re.search(r'合成视频_(?:[\d_]+_)?(\d+)\.mp4$', f)
-                    if match:
-                        indices.append(int(match.group(1)))
-                
-                if indices:
-                    start_index = max(indices) + 1
-            except Exception as e:
-                logger.warning(f"确定起始序号时出错: {str(e)}，将使用默认序号")
-        
-        logger.info(f"视频生成将从序号 {start_index} 开始")
-        
+        # 生成视频文件
         for i in range(count):
             if self.stop_requested:
-                logger.info("收到停止请求，中断视频合成")
+                logger.info("收到停止请求，中断视频批量处理")
                 break
-                
+            
+            # 构建输出文件路径
+            output_filename = f"合成视频_{timestamp}_{i+1}.mp4"
+            output_path = os.path.join(output_dir, output_filename)
+            
+            # 设置该视频的进度范围
+            progress_start = 5 + i * progress_per_video
+            progress_end = 5 + (i + 1) * progress_per_video
+            
+            self.report_progress(f"正在生成第 {i+1}/{count} 个视频...", progress_start)
+            
             try:
-                # 生成带时间戳的文件名，避免覆盖之前的文件
-                file_index = start_index + i
-                output_path = os.path.join(output_dir, f"合成视频_{timestamp}_{file_index}.mp4")
-                self.report_progress(f"正在生成视频 {i+1}/{count}", 5 + progress_per_video * i)
-                
-                self._process_single_video(
+                # 处理单个视频
+                result_path = self._process_single_video(
                     material_data, 
                     output_path, 
                     bgm_path,
-                    progress_start=5 + progress_per_video * i,
-                    progress_end=5 + progress_per_video * (i + 1)
+                    progress_start,
+                    progress_end
                 )
                 
-                # 验证生成的视频文件
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    output_videos.append(output_path)
-                    logger.info(f"成功生成视频: {output_path}")
-                else:
-                    logger.error(f"视频文件未正确生成或为空: {output_path}")
-                
-                self.report_progress(f"视频 {i+1}/{count} 生成完成", 5 + progress_per_video * (i + 1))
+                output_videos.append(result_path)
+                logger.info(f"第 {i+1}/{count} 个视频生成完成: {result_path}")
             except Exception as e:
-                logger.error(f"生成视频 {i+1}/{count} 失败: {str(e)}")
-                self.report_progress(f"视频 {i+1}/{count} 生成失败: {str(e)}", 5 + progress_per_video * i)
+                logger.error(f"生成第 {i+1}/{count} 个视频时出错: {str(e)}")
+                # 继续处理下一个视频
+                continue
         
-        # 如果一个视频都没有生成，抛出异常
-        if not output_videos:
-            error_msg = "没有成功生成任何视频，请检查日志获取详细错误信息"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
+        # 计算总用时
+        total_time = time.time() - self.start_time
+        total_time_str = self._format_time(total_time)
         
-        self.report_progress(f"批量视频处理完成，成功生成: {len(output_videos)}/{count}", 100)
-        logger.info(f"批量视频处理完成，成功生成: {len(output_videos)}/{count}")
+        self.report_progress(f"批量视频处理完成，成功生成: {len(output_videos)}/{count}，总用时: {total_time_str}", 100)
+        logger.info(f"批量视频处理完成，成功生成: {len(output_videos)}/{count}，总用时: {total_time_str}")
         
-        return output_videos
+        return output_videos, total_time_str
     
     def stop_processing(self):
         """停止处理"""
