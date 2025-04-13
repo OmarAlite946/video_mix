@@ -637,11 +637,11 @@ class VideoProcessor:
                     # 根据配音时长裁剪视频
                     if audio_file and audio_duration > 0:
                         # 确保视频时长不小于配音时长
-                        clip_duration = max(audio_duration, min(video_duration, audio_duration + 1))
+                        clip_duration = audio_duration
                         
-                        # 如果视频比配音长，则从视频中间部分开始截取
+                        # 如果视频比配音长，则从视频开头开始截取，而不是从中间
                         if video_duration > clip_duration:
-                            start_time = (video_duration - clip_duration) / 2
+                            start_time = 0  # 从视频开头开始截取
                             video_clip = video_clip.subclip(start_time, start_time + clip_duration)
                         
                         # 加载配音
@@ -1264,6 +1264,31 @@ class VideoProcessor:
         """
         判断是否应该使用直接FFmpeg命令进行编码
         主要用于启用硬件加速时跳过MoviePy的编码流程
+        
+        关于重编码模式和快速不重编码模式：
+        
+        1. 重编码模式（返回False）：
+           - 使用MoviePy处理视频后再使用FFmpeg编码
+           - 优势：
+             * 更高的兼容性和稳定性
+             * 支持更丰富的视频处理效果
+             * 更适合复杂的视频特效和转场
+           - 劣势：
+             * 处理速度较慢，需要两次编码
+             * 可能导致额外的质量损失
+             * 内存占用较高
+           
+        2. 快速不重编码模式（返回True）：
+           - 直接使用FFmpeg硬件加速编码，跳过MoviePy的编码流程
+           - 优势：
+             * 处理速度更快，通常快2-5倍
+             * 减少视频质量损失
+             * 更高效利用GPU资源
+             * 内存占用更低
+           - 劣势：
+             * 可能与某些特效或转场不兼容
+             * 在旧GPU或驱动上可能不稳定
+             * 编码选项较为有限
         
         Args:
             codec: 当前使用的编码器
