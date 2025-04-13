@@ -1301,6 +1301,17 @@ class VideoProcessor:
         Returns:
             bool: 是否应该使用直接FFmpeg命令
         """
+        # 优先检查视频模式设置
+        video_mode = self.settings.get("video_mode", "")
+        if video_mode == "standard_mode":
+            logger.info("使用标准模式(重编码)，不使用直接FFmpeg")
+            return False
+        elif video_mode == "fast_mode":
+            logger.info("使用快速模式(不重编码)，将使用直接FFmpeg")
+            return True
+        
+        # 如果没有指定视频模式或使用旧的设置格式，则使用原有逻辑
+        
         # 如果硬件加速没有启用，直接返回False
         hardware_accel = self.settings.get("hardware_accel", "none")
         if hardware_accel == "none":

@@ -7,30 +7,34 @@
 
 import os
 import sys
+import time
+import json
+import shutil
 import subprocess
+import threading
 import logging
 from pathlib import Path
+from typing import Dict, List, Any, Tuple, Callable, Optional, Union
+
 from PyQt5.QtWidgets import (
-    QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, 
-    QPushButton, QLabel, QComboBox, QSpinBox, QLineEdit, 
-    QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, 
-    QMessageBox, QGroupBox, QFormLayout, QDoubleSpinBox, QCheckBox,
-    QProgressBar, QStatusBar, QApplication
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, 
+    QLabel, QPushButton, QLineEdit, QSpinBox, QDoubleSpinBox, 
+    QProgressBar, QComboBox, QTabWidget, QGroupBox, QFileDialog,
+    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
+    QCheckBox, QStatusBar, QAction, QMenu, QTextEdit, QDialog
 )
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QMetaObject, Q_ARG, Qt
 from PyQt5 import QtCore
-from PyQt5.QtCore import Qt, QSize, pyqtSlot
-from PyQt5.QtGui import QIcon, QFont
-from utils.file_utils import list_media_files
+from PyQt5.QtGui import QFont
 
-# 导入GPU检测和配置模块
-from hardware.system_analyzer import SystemAnalyzer
-from hardware.gpu_config import GPUConfig
+from src.utils.logger import get_logger
+from src.utils.cache_config import CacheConfig
+from src.hardware.system_analyzer import SystemAnalyzer
+from src.hardware.gpu_config import GPUConfig
+from src.utils.help_system import HelpSystem
+from src.utils.file_utils import list_media_files
 
-# 导入缓存配置模块
-from utils.cache_config import CacheConfig
-
-# 设置日志
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class MainWindow(QMainWindow):
     """应用程序主窗口"""
@@ -105,12 +109,19 @@ class MainWindow(QMainWindow):
         list_layout.addLayout(btn_layout)
         
         self.btn_add_material = QPushButton("添加素材")
+        self.btn_add_material.setVisible(False)  # 隐藏添加素材按钮
         self.btn_batch_import = QPushButton("批量导入")
         self.btn_refresh_material = QPushButton("刷新素材")
         self.btn_clear_material = QPushButton("清空素材")
         
+        # 创建批量导入按钮和帮助按钮的布局
+        batch_import_layout = QHBoxLayout()
+        batch_import_layout.addWidget(self.btn_batch_import)
+        HelpSystem.add_help_button(batch_import_layout, "batch_import")
+        batch_import_layout.addStretch()
+        
         btn_layout.addWidget(self.btn_add_material)
-        btn_layout.addWidget(self.btn_batch_import)
+        btn_layout.addLayout(batch_import_layout)
         btn_layout.addWidget(self.btn_refresh_material)
         btn_layout.addWidget(self.btn_clear_material)
         
@@ -129,18 +140,12 @@ class MainWindow(QMainWindow):
         mode_layout.addWidget(self.combo_audio_mode)
         mode_layout.addStretch()
         
-        video_mode_layout = QHBoxLayout()
-        self.combo_video_mode = QComboBox()
-        self.combo_video_mode.addItems(["标准模式（重编码）", "快速模式（不重编码）"])
-        
-        video_mode_layout.addWidget(QLabel("视频模式:"))
-        video_mode_layout.addWidget(self.combo_video_mode)
-        video_mode_layout.addStretch()
+        # 添加合成模式帮助按钮
+        HelpSystem.add_help_button(mode_layout, "compose_mode")
         
         settings_layout.addRow(mode_layout)
-        settings_layout.addRow(video_mode_layout)
         
-        # 分辨率和比特率
+        # 分辨率设置
         resolution_layout = QHBoxLayout()
         self.combo_resolution = QComboBox()
         self.combo_resolution.addItems(["竖屏 1080x1920", "横屏 1920x1080", "竖屏 720x1280", "横屏 1280x720"])
@@ -149,19 +154,70 @@ class MainWindow(QMainWindow):
         resolution_layout.addWidget(self.combo_resolution)
         resolution_layout.addStretch()
         
+        # 添加分辨率帮助按钮
+        HelpSystem.add_help_button(resolution_layout, "resolution")
+        
+        settings_layout.addRow(resolution_layout)
+        
+        # 比特率设置
         bitrate_layout = QHBoxLayout()
         self.spin_bitrate = QSpinBox()
         self.spin_bitrate.setRange(1000, 20000)
         self.spin_bitrate.setValue(5000)
         self.spin_bitrate.setSuffix(" k")
         
+        # 添加比特率范围说明标签
+        bitrate_info_layout = QHBoxLayout()
+        bitrate_info_label = QLabel("推荐值：抖音竖屏4000-8000k，横屏3000-6000k；720p(2000-4000k)，1080p(4000-8000k)，2K/1440p(8000-12000k)，4K/2160p(12000-15000k)")
+        bitrate_info_label.setStyleSheet("color: #666666; font-size: 9pt;")
+        bitrate_info_layout.addWidget(bitrate_info_label)
+        bitrate_info_layout.addStretch()
+        
+        # 添加保持原画比特率选项
+        self.chk_original_bitrate = QCheckBox("与原画一致")
+        self.chk_original_bitrate.setChecked(False)  # 默认不选中
+        self.chk_original_bitrate.toggled.connect(self._on_original_bitrate_toggled)
+        
+        # 确保比特率输入框初始是启用状态
+        self.spin_bitrate.setEnabled(True)
+        
         bitrate_layout.addWidget(QLabel("比特率:"))
         bitrate_layout.addWidget(self.spin_bitrate)
+        bitrate_layout.addWidget(self.chk_original_bitrate)
         bitrate_layout.addStretch()
         
-        settings_layout.addRow(resolution_layout)
-        settings_layout.addRow(bitrate_layout)
+        # 添加比特率帮助按钮
+        HelpSystem.add_help_button(bitrate_layout, "bitrate")
         
+        # 添加"与原画一致"选项帮助按钮
+        original_bitrate_layout = QHBoxLayout()
+        original_bitrate_label = QLabel("与原画一致选项:")
+        original_bitrate_label.setStyleSheet("color: #666666;")
+        original_bitrate_layout.addWidget(original_bitrate_label)
+        HelpSystem.add_help_button(original_bitrate_layout, "original_bitrate")
+        original_bitrate_layout.addStretch()
+        
+        settings_layout.addRow(bitrate_layout)
+        settings_layout.addRow(bitrate_info_layout)  # 添加比特率范围说明行
+        settings_layout.addRow(original_bitrate_layout)  # 添加"与原画一致"帮助行
+        
+        # 转场效果设置
+        transition_layout = QHBoxLayout()
+        self.combo_transition = QComboBox()
+        self.combo_transition.addItems([
+            "不使用转场", "随机转场", "镜像翻转", "色相偏移", "光束扫描", 
+            "像素化过渡", "轻微旋转缩放", "倒放闪回", "速度波动过渡", "分屏滑动"
+        ])
+        
+        transition_layout.addWidget(QLabel("转场效果:"))
+        transition_layout.addWidget(self.combo_transition)
+        transition_layout.addStretch()
+        
+        # 添加转场效果帮助按钮
+        HelpSystem.add_help_button(transition_layout, "transition")
+        
+        settings_layout.addRow(transition_layout)
+
         # GPU加速
         gpu_layout = QHBoxLayout()
         self.combo_gpu = QComboBox()
@@ -176,8 +232,11 @@ class MainWindow(QMainWindow):
         gpu_layout.addWidget(self.btn_detect_gpu)
         gpu_layout.addStretch()
         
-        settings_layout.addRow(gpu_layout)
+        # 添加显卡加速帮助按钮
+        HelpSystem.add_help_button(gpu_layout, "gpu_accel")
         
+        settings_layout.addRow(gpu_layout)
+
         # 保存目录
         save_dir_layout = QHBoxLayout()
         self.edit_save_dir = QLineEdit()
@@ -189,23 +248,25 @@ class MainWindow(QMainWindow):
         save_dir_layout.addWidget(self.btn_browse_save_dir)
         save_dir_layout.addWidget(self.btn_open_save_dir)
         
+        # 添加保存目录帮助按钮
+        HelpSystem.add_help_button(save_dir_layout, "save_directory")
+        
         settings_layout.addRow(save_dir_layout)
         
-        # 缓存目录
-        cache_dir_layout = QHBoxLayout()
-        self.edit_cache_dir = QLineEdit()
-        self.edit_cache_dir.setText(self.cache_config.get_cache_dir())
-        self.btn_browse_cache_dir = QPushButton("选择")
-        self.btn_open_cache_dir = QPushButton("打开")
-        self.btn_clear_cache = QPushButton("清理缓存")
+        # 添加编码模式选择
+        encode_mode_layout = QHBoxLayout()
+        self.combo_encode_mode = QComboBox()
+        self.combo_encode_mode.addItems(["快速模式(不重编码)", "标准模式(重编码)"])
+        self.combo_encode_mode.setCurrentIndex(0)  # 设置默认为快速模式(不重编码)
         
-        cache_dir_layout.addWidget(QLabel("缓存目录:"))
-        cache_dir_layout.addWidget(self.edit_cache_dir)
-        cache_dir_layout.addWidget(self.btn_browse_cache_dir)
-        cache_dir_layout.addWidget(self.btn_open_cache_dir)
-        cache_dir_layout.addWidget(self.btn_clear_cache)
+        encode_mode_layout.addWidget(QLabel("编码模式:"))
+        encode_mode_layout.addWidget(self.combo_encode_mode)
+        encode_mode_layout.addStretch()
         
-        settings_layout.addRow(cache_dir_layout)
+        # 添加编码模式帮助按钮
+        HelpSystem.add_help_button(encode_mode_layout, "encode_mode")
+        
+        settings_layout.addRow(encode_mode_layout)
         
         # 音量设置
         volume_layout = QHBoxLayout()
@@ -227,6 +288,9 @@ class MainWindow(QMainWindow):
         volume_layout.addWidget(self.spin_bgm_volume)
         volume_layout.addStretch()
         
+        # 添加音量设置帮助按钮
+        HelpSystem.add_help_button(volume_layout, "volume_settings")
+        
         settings_layout.addRow(volume_layout)
         
         # 背景音乐设置
@@ -240,21 +304,29 @@ class MainWindow(QMainWindow):
         bgm_layout.addWidget(self.btn_browse_bgm)
         bgm_layout.addWidget(self.btn_play_bgm)
         
+        # 添加背景音乐帮助按钮
+        HelpSystem.add_help_button(bgm_layout, "background_music")
+        
         settings_layout.addRow(bgm_layout)
         
-        # 转场效果设置
-        transition_layout = QHBoxLayout()
-        self.combo_transition = QComboBox()
-        self.combo_transition.addItems([
-            "不使用转场", "随机转场", "镜像翻转", "色相偏移", "光束扫描", 
-            "像素化过渡", "轻微旋转缩放", "倒放闪回", "速度波动过渡", "分屏滑动"
-        ])
+        # 缓存目录
+        cache_dir_layout = QHBoxLayout()
+        self.edit_cache_dir = QLineEdit()
+        self.edit_cache_dir.setText(self.cache_config.get_cache_dir())
+        self.btn_browse_cache_dir = QPushButton("选择")
+        self.btn_open_cache_dir = QPushButton("打开")
+        self.btn_clear_cache = QPushButton("清理缓存")
         
-        transition_layout.addWidget(QLabel("转场效果:"))
-        transition_layout.addWidget(self.combo_transition)
-        transition_layout.addStretch()
+        cache_dir_layout.addWidget(QLabel("缓存目录:"))
+        cache_dir_layout.addWidget(self.edit_cache_dir)
+        cache_dir_layout.addWidget(self.btn_browse_cache_dir)
+        cache_dir_layout.addWidget(self.btn_open_cache_dir)
+        cache_dir_layout.addWidget(self.btn_clear_cache)
         
-        settings_layout.addRow(transition_layout)
+        # 添加缓存目录帮助按钮
+        HelpSystem.add_help_button(cache_dir_layout, "cache_directory")
+        
+        settings_layout.addRow(cache_dir_layout)
         
         # 生成数量设置
         count_layout = QHBoxLayout()
@@ -266,6 +338,9 @@ class MainWindow(QMainWindow):
         count_layout.addWidget(QLabel("生成数量:"))
         count_layout.addWidget(self.spin_generate_count)
         count_layout.addStretch()
+        
+        # 添加生成数量帮助按钮
+        HelpSystem.add_help_button(count_layout, "generate_count")
         
         settings_layout.addRow(count_layout)
         
@@ -333,6 +408,14 @@ class MainWindow(QMainWindow):
         # 帮助菜单
         help_menu = menubar.addMenu("帮助")
         
+        # 添加主要功能菜单项
+        main_features_action = help_menu.addAction("主要功能")
+        main_features_action.triggered.connect(self.show_main_features)
+        
+        # 添加性能优化提示菜单项
+        performance_tips_action = help_menu.addAction("性能优化提示")
+        performance_tips_action.triggered.connect(self.show_performance_tips)
+        
         ffmpeg_guide_action = help_menu.addAction("安装FFmpeg指南")
         ffmpeg_guide_action.triggered.connect(self.show_ffmpeg_guide)
         
@@ -341,6 +424,14 @@ class MainWindow(QMainWindow):
         
         about_action = help_menu.addAction("关于")
         about_action.triggered.connect(self.show_about)
+    
+    def show_main_features(self):
+        """显示主要功能帮助页面"""
+        HelpSystem.show_help_dialog("main_features")
+    
+    def show_performance_tips(self):
+        """显示性能优化提示帮助页面"""
+        HelpSystem.show_help_dialog("performance_tips")
     
     def show_ffmpeg_guide(self):
         """显示FFmpeg安装指南"""
@@ -1092,10 +1183,22 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
     
     def _get_compose_params(self):
         """获取当前合成参数"""
+        
+        # 将UI中的编码模式转换为处理器需要的格式
+        encode_mode_text = self.combo_encode_mode.currentText()
+        video_mode = ""
+        
+        if "快速模式" in encode_mode_text or "不重编码" in encode_mode_text:
+            video_mode = "fast_mode"
+            logger.info("选择了快速模式(不重编码)")
+        else:
+            video_mode = "standard_mode"
+            logger.info("选择了标准模式(重编码)")
+        
         params = {
             "text_mode": self.combo_audio_mode.currentText(),
             "audio_mode": self.combo_audio_mode.currentText(),
-            "video_mode": self.combo_video_mode.currentText(),
+            "video_mode": video_mode,  # 使用处理过的video_mode值
             "resolution": self.combo_resolution.currentText(),
             "bitrate": self.spin_bitrate.value(),
             "gpu": self.combo_gpu.currentText(),
@@ -1167,7 +1270,8 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 "transition": params["transition"].lower(),
                 "transition_duration": 0.5,  # 默认转场时长
                 "threads": 4,  # 默认线程数
-                "temp_dir": self.cache_config.get_cache_dir()  # 使用缓存配置的目录
+                "temp_dir": self.cache_config.get_cache_dir(),  # 使用缓存配置的目录
+                "video_mode": params["video_mode"]  # 添加视频模式参数
             }
             
             # 更新状态栏
@@ -2307,3 +2411,14 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 "清理失败", 
                 f"清理缓存文件时出错：{str(e)}"
             )
+
+    @QtCore.pyqtSlot(bool)
+    def _on_original_bitrate_toggled(self, checked):
+        """处理与原画一致选项的切换"""
+        self.spin_bitrate.setEnabled(not checked)  # 当勾选时禁用比特率输入框
+        if checked:
+            # 当勾选"与原画一致"时，记录当前值（实际应该由视频处理器在处理时检测原视频比特率）
+            logger.info("已启用使用原视频比特率")
+        else:
+            # 不需要在这里重置值，保留用户之前设置的比特率
+            pass
