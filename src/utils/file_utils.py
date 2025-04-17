@@ -34,20 +34,60 @@ def resolve_shortcut(shortcut_path: Union[str, Path]) -> Optional[str]:
         Optional[str]: 快捷方式目标路径，如果解析失败则返回None
     """
     if not os.path.exists(shortcut_path) or not str(shortcut_path).lower().endswith('.lnk'):
+        logger.debug(f"不是有效的快捷方式文件: {shortcut_path}")
         return None
         
     try:
         import win32com.client
+        
+        # 确保使用绝对路径
+        abs_shortcut_path = os.path.abspath(str(shortcut_path))
+        
         shell = win32com.client.Dispatch("WScript.Shell")
-        shortcut = shell.CreateShortCut(str(shortcut_path))
+        shortcut = shell.CreateShortCut(abs_shortcut_path)
         target_path = shortcut.Targetpath
         
+        logger.debug(f"解析快捷方式: {abs_shortcut_path} -> {target_path}")
+        
+        # 检查目标路径是否存在
+        if not target_path:
+            logger.warning(f"快捷方式目标路径为空: {abs_shortcut_path}")
+            return None
+            
+        # 如果目标路径是相对路径，尝试转换为绝对路径
+        if not os.path.isabs(target_path):
+            # 尝试以快捷方式所在目录为基准
+            shortcut_dir = os.path.dirname(abs_shortcut_path)
+            possible_target = os.path.join(shortcut_dir, target_path)
+            
+            if os.path.exists(possible_target) and os.path.isdir(possible_target):
+                target_path = possible_target
+                logger.info(f"相对路径转换为绝对路径: {target_path}")
+        
         # 检查目标路径是否存在并且是目录
-        if target_path and os.path.exists(target_path) and os.path.isdir(target_path):
-            logger.info(f"解析快捷方式成功: {shortcut_path} -> {target_path}")
+        if os.path.exists(target_path) and os.path.isdir(target_path):
+            logger.info(f"解析快捷方式成功: {abs_shortcut_path} -> {target_path}")
             return target_path
         else:
-            logger.warning(f"快捷方式目标不存在或不是目录: {shortcut_path} -> {target_path}")
+            logger.warning(f"快捷方式目标不存在或不是目录: {abs_shortcut_path} -> {target_path}")
+            
+            # 尝试使用其他方法解析
+            try:
+                # 尝试获取Windows资源管理器中的目标
+                import subprocess
+                cmd = ['cmd', '/c', 'dir', '/A:L', abs_shortcut_path]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        if '->' in line:
+                            target = line.split('->')[-1].strip()
+                            if os.path.exists(target) and os.path.isdir(target):
+                                logger.info(f"通过cmd解析快捷方式成功: {abs_shortcut_path} -> {target}")
+                                return target
+            except Exception as e:
+                logger.debug(f"尝试cmd解析快捷方式失败: {str(e)}")
+            
             return None
     except Exception as e:
         logger.warning(f"解析快捷方式失败 {shortcut_path}: {str(e)}")

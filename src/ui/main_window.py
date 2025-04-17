@@ -21,11 +21,11 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QSpinBox, QDoubleSpinBox, 
     QProgressBar, QComboBox, QTabWidget, QGroupBox, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-    QCheckBox, QStatusBar, QAction, QMenu, QTextEdit, QDialog
+    QCheckBox, QStatusBar, QAction, QMenu, QTextEdit, QDialog, QApplication, QStyle
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QMetaObject, Q_ARG, Qt
 from PyQt5 import QtCore
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon
 
 from src.utils.logger import get_logger
 from src.utils.cache_config import CacheConfig
@@ -1594,74 +1594,146 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         import os
         from pathlib import Path
         from src.utils.file_utils import resolve_shortcut
+        from src.utils.logger import get_logger
+        
+        logger = get_logger()
         
         added_count = 0
         skipped_count = 0
+        normal_count = 0
+        shortcut_count = 0
+        shortcut_errors = 0
         
-        # 遍历根目录下的所有子文件夹
-        for item in os.listdir(root_dir):
-            item_path = os.path.join(root_dir, item)
-            
-            actual_path = item_path
-            is_shortcut = False
-            
-            # 检查是否是快捷方式
-            if item.lower().endswith('.lnk'):
-                shortcut_target = resolve_shortcut(item_path)
-                if shortcut_target:
-                    actual_path = shortcut_target
-                    is_shortcut = True
-                    print(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
-            
-            # 只处理文件夹(或解析后的快捷方式目标是文件夹)
-            if not os.path.isdir(actual_path):
-                continue
-            
-            # 检查是否有"视频"或"配音"子文件夹
-            has_video_folder = os.path.exists(os.path.join(actual_path, "视频"))
-            has_audio_folder = os.path.exists(os.path.join(actual_path, "配音"))
-            
-            if has_video_folder or has_audio_folder:
-                # 检查子文件夹中是否有媒体文件
-                video_count = 0
-                audio_count = 0
+        # 设置鼠标等待状态
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        
+        try:
+            # 遍历根目录下的所有子文件夹
+            for item in os.listdir(root_dir):
+                item_path = os.path.join(root_dir, item)
                 
-                if has_video_folder:
-                    media = list_media_files(os.path.join(actual_path, "视频"), recursive=True)
-                    video_count = len(media['videos'])
+                actual_path = item_path
+                is_shortcut = False
                 
-                if has_audio_folder:
-                    media = list_media_files(os.path.join(actual_path, "配音"), recursive=True)
-                    audio_count = len(media['audios'])
+                # 检查是否是快捷方式
+                if item.lower().endswith('.lnk'):
+                    logger.info(f"发现可能的快捷方式: {item_path}")
+                    shortcut_target = resolve_shortcut(item_path)
+                    if shortcut_target:
+                        actual_path = shortcut_target
+                        is_shortcut = True
+                        shortcut_count += 1
+                        logger.info(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
+                    else:
+                        shortcut_errors += 1
+                        logger.warning(f"无法解析快捷方式: {item_path}")
+                        continue
+                elif os.path.isdir(item_path):
+                    normal_count += 1
+                else:
+                    logger.debug(f"跳过非文件夹项目: {item_path}")
+                    continue
                 
-                # 如果有媒体文件，则添加到素材列表
-                if video_count > 0 or audio_count > 0:
-                    row_count = self.video_table.rowCount()
-                    self.video_table.setRowCount(row_count + 1)
+                # 只处理文件夹(或解析后的快捷方式目标是文件夹)
+                if not os.path.isdir(actual_path):
+                    logger.warning(f"项目不是目录，跳过: {actual_path}")
+                    continue
+                
+                # 检查是否有"视频"或"配音"子文件夹
+                has_video_folder = os.path.exists(os.path.join(actual_path, "视频"))
+                has_audio_folder = os.path.exists(os.path.join(actual_path, "配音"))
+                
+                if has_video_folder or has_audio_folder:
+                    # 检查子文件夹中是否有媒体文件
+                    video_count = 0
+                    audio_count = 0
                     
-                    # 如果是快捷方式，显示名称时去掉.lnk后缀
-                    display_name = item
-                    if is_shortcut:
-                        if display_name.lower().endswith('.lnk'):
-                            display_name = display_name[:-4]
-                        display_name += " (快捷方式)"
+                    if has_video_folder:
+                        try:
+                            media = list_media_files(os.path.join(actual_path, "视频"), recursive=True)
+                            video_count = len(media['videos'])
+                        except Exception as e:
+                            logger.error(f"扫描视频文件夹失败: {str(e)}")
                     
-                    self.video_table.setItem(row_count, 0, QTableWidgetItem(str(row_count + 1)))  # 序号
-                    self.video_table.setItem(row_count, 1, QTableWidgetItem(display_name))  # 素材名称
-                    self.video_table.setItem(row_count, 2, QTableWidgetItem(actual_path))  # 素材路径 (使用实际路径)
-                    self.video_table.setItem(row_count, 3, QTableWidgetItem(str(video_count)))  # 视频数量
-                    self.video_table.setItem(row_count, 4, QTableWidgetItem(str(audio_count)))  # 配音数量
-                    self.video_table.setItem(row_count, 5, QTableWidgetItem("待处理"))  # 状态
+                    if has_audio_folder:
+                        try:
+                            media = list_media_files(os.path.join(actual_path, "配音"), recursive=True)
+                            audio_count = len(media['audios'])
+                        except Exception as e:
+                            logger.error(f"扫描音频文件夹失败: {str(e)}")
                     
-                    added_count += 1
+                    # 如果有媒体文件，则添加到素材列表
+                    if video_count > 0 or audio_count > 0:
+                        row_count = self.video_table.rowCount()
+                        self.video_table.setRowCount(row_count + 1)
+                        
+                        # 如果是快捷方式，显示名称时去掉.lnk后缀
+                        display_name = item
+                        if is_shortcut:
+                            if display_name.lower().endswith('.lnk'):
+                                display_name = display_name[:-4]
+                            display_name += " (快捷方式)"
+                        
+                        # 添加图标以区分本体和快捷方式
+                        folder_item = QTableWidgetItem(display_name)
+                        if is_shortcut:
+                            # 使用Qt内置图标
+                            folder_item.setIcon(QApplication.style().standardIcon(QStyle.SP_FileLinkIcon))
+                        else:
+                            folder_item.setIcon(QApplication.style().standardIcon(QStyle.SP_DirIcon))
+                        
+                        self.video_table.setItem(row_count, 0, QTableWidgetItem(str(row_count + 1)))  # 序号
+                        self.video_table.setItem(row_count, 1, folder_item)  # 素材名称（带图标）
+                        self.video_table.setItem(row_count, 2, QTableWidgetItem(actual_path))  # 素材路径 (使用实际路径)
+                        
+                        # 如果是快捷方式，添加原始路径信息
+                        tooltip = f"实际路径: {actual_path}"
+                        if is_shortcut:
+                            tooltip = f"快捷方式: {item_path}\n{tooltip}"
+                        folder_item.setToolTip(tooltip)
+                        
+                        self.video_table.setItem(row_count, 3, QTableWidgetItem(str(video_count)))  # 视频数量
+                        self.video_table.setItem(row_count, 4, QTableWidgetItem(str(audio_count)))  # 配音数量
+                        self.video_table.setItem(row_count, 5, QTableWidgetItem("待处理"))  # 状态
+                        
+                        added_count += 1
+                    else:
+                        skipped_count += 1
+                        logger.warning(f"跳过没有媒体文件的素材文件夹: {actual_path}")
                 else:
                     skipped_count += 1
+                    logger.warning(f"跳过没有视频或配音子文件夹的素材文件夹: {actual_path}")
+        except Exception as e:
+            logger.error(f"批量导入时出错: {str(e)}")
+            QMessageBox.critical(self, "导入错误", f"扫描素材文件夹时出错:\n{str(e)}")
+        finally:
+            # 恢复鼠标状态
+            QApplication.restoreOverrideCursor()
+        
+        # 记录混合情况的信息
+        if normal_count > 0 and shortcut_count > 0:
+            logger.info(f"批量导入: 检测到混合模式，包含 {normal_count} 个普通文件夹和 {shortcut_count} 个快捷方式")
+        elif shortcut_count > 0:
+            logger.info(f"批量导入: 检测到纯快捷方式模式，包含 {shortcut_count} 个快捷方式")
+        else:
+            logger.info(f"批量导入: 检测到标准模式，包含 {normal_count} 个普通文件夹")
         
         if added_count > 0:
+            # 创建更详细的导入结果消息
+            import_message = f"成功导入 {added_count} 个素材文件夹\n跳过 {skipped_count} 个不包含媒体文件的文件夹"
+            
+            # 添加混合模式信息
+            if normal_count > 0 and shortcut_count > 0:
+                import_message += f"\n\n导入细节:\n- {normal_count} 个普通文件夹\n- {shortcut_count} 个快捷方式文件夹"
+            
+            # 添加快捷方式错误信息
+            if shortcut_errors > 0:
+                import_message += f"\n\n警告: {shortcut_errors} 个快捷方式无法正确解析"
+            
             QMessageBox.information(
                 self, 
                 "批量导入完成", 
-                f"成功导入 {added_count} 个素材文件夹\n跳过 {skipped_count} 个不包含媒体文件的文件夹"
+                import_message
             )
         else:
             QMessageBox.warning(

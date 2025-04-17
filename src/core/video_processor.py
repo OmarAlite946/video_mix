@@ -317,11 +317,15 @@ class VideoProcessor:
         """
         扫描素材文件夹，获取视频和配音文件
         
-        支持两种导入模式：
+        支持三种导入模式：
         1. 直接导入独立场景文件夹（原有模式）
         2. 导入父文件夹，从中提取按顺序排列的子文件夹作为场景（新模式）
+        3. 混合模式：支持同一父文件夹下同时包含普通子文件夹和快捷方式子文件夹
         
-        现在还支持使用快捷方式作为子文件夹，会自动解析到目标文件夹
+        快捷方式支持：
+        - 支持Windows快捷方式(.lnk文件)作为子文件夹
+        - 自动解析快捷方式指向的实际目标文件夹
+        - 支持同一父文件夹下混合普通文件夹和快捷方式
         
         Args:
             material_folders: 素材文件夹信息列表
@@ -346,28 +350,55 @@ class VideoProcessor:
             # 检测是否为父文件夹导入模式（检查是否包含子文件夹）
             is_parent_folder = False
             sub_folders = []
+            normal_count = 0
+            shortcut_count = 0
+            shortcut_errors = 0
             
-            # 获取子文件夹列表
-            for item in os.listdir(folder_path):
-                item_path = os.path.join(folder_path, item)
-                
-                actual_path = item_path
-                is_shortcut = False
-                
-                # 检查是否是快捷方式
-                if item.lower().endswith('.lnk'):
-                    shortcut_target = resolve_shortcut(item_path)
-                    if shortcut_target:
-                        actual_path = shortcut_target
-                        is_shortcut = True
-                        logger.info(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
-                
-                # 检查实际路径是否是目录
-                if os.path.isdir(actual_path):
+            try:
+                # 获取子文件夹列表
+                for item in os.listdir(folder_path):
+                    item_path = os.path.join(folder_path, item)
+                    
+                    actual_path = item_path
+                    is_shortcut = False
+                    
+                    # 检查是否是快捷方式
+                    if item.lower().endswith('.lnk'):
+                        logger.info(f"父文件夹模式：检测到可能的快捷方式: {item_path}")
+                        shortcut_target = resolve_shortcut(item_path)
+                        if shortcut_target:
+                            actual_path = shortcut_target
+                            is_shortcut = True
+                            shortcut_count += 1
+                            logger.info(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
+                        else:
+                            shortcut_errors += 1
+                            logger.warning(f"无法解析快捷方式: {item_path}")
+                            continue
+                    elif os.path.isdir(item_path):
+                        normal_count += 1
+                    else:
+                        logger.debug(f"跳过非文件夹项目: {item_path}")
+                        continue
+                    
+                    # 检查实际路径是否是目录
+                    if not os.path.isdir(actual_path):
+                        logger.warning(f"路径不是目录，跳过: {actual_path}")
+                        continue
+                    
                     # 检查子文件夹是否包含标准结构（视频文件夹或配音文件夹）
                     video_dir = os.path.join(actual_path, "视频")
                     audio_dir = os.path.join(actual_path, "配音")
-                    if os.path.isdir(video_dir) or os.path.isdir(audio_dir):
+                    
+                    has_valid_structure = False
+                    
+                    if os.path.isdir(video_dir):
+                        has_valid_structure = True
+                    
+                    if os.path.isdir(audio_dir):
+                        has_valid_structure = True
+                    
+                    if has_valid_structure:
                         sub_folder_info = {
                             "path": actual_path,
                             "name": item,  # 保留原始名称，用于显示
@@ -375,11 +406,35 @@ class VideoProcessor:
                             "original_path": item_path if is_shortcut else None
                         }
                         sub_folders.append(sub_folder_info)
+                    else:
+                        logger.warning(f"子文件夹不包含视频或配音目录，跳过: {actual_path}")
+            except Exception as e:
+                logger.error(f"扫描父文件夹时出错: {folder_path}, 错误: {str(e)}")
+                # 继续处理其他文件夹
             
             # 如果找到符合条件的子文件夹，认为是父文件夹导入模式
             if sub_folders:
                 is_parent_folder = True
-                logger.info(f"检测到父文件夹导入模式，找到 {len(sub_folders)} 个子文件夹 (包含快捷方式: {sum(1 for sf in sub_folders if sf['is_shortcut'])})")
+                
+                # 记录混合情况的信息
+                folder_detail = ""
+                if normal_count > 0 and shortcut_count > 0:
+                    folder_detail = f"(包含 {normal_count} 个普通子文件夹和 {shortcut_count} 个快捷方式子文件夹)"
+                    logger.info(f"检测到混合模式：父文件夹 '{folder_name}' 中包含 {normal_count} 个普通子文件夹和 {shortcut_count} 个快捷方式子文件夹")
+                elif shortcut_count > 0:
+                    folder_detail = f"(包含 {shortcut_count} 个快捷方式子文件夹)"
+                    logger.info(f"检测到纯快捷方式模式：父文件夹 '{folder_name}' 中包含 {shortcut_count} 个快捷方式子文件夹")
+                else:
+                    folder_detail = f"(包含 {normal_count} 个普通子文件夹)"
+                    logger.info(f"检测到标准父文件夹模式：父文件夹 '{folder_name}' 中包含 {normal_count} 个普通子文件夹")
+                
+                # 显示有效子文件夹数量
+                found_count = len(sub_folders)
+                logger.info(f"在父文件夹 '{folder_name}' {folder_detail} 中找到 {found_count} 个有效子文件夹")
+                
+                # 如果有快捷方式解析错误，记录警告
+                if shortcut_errors > 0:
+                    logger.warning(f"父文件夹 '{folder_name}' 中有 {shortcut_errors} 个快捷方式无法解析")
                 
                 # 对子文件夹按名称排序，确保按正确顺序处理
                 sub_folders.sort(key=lambda x: x["name"])
@@ -390,10 +445,17 @@ class VideoProcessor:
                     sub_name = sub_folder_info["name"]
                     
                     if sub_folder_info["is_shortcut"]:
-                        sub_name = sub_name[:-4]  # 移除.lnk后缀，以便更好的显示
+                        # 移除.lnk后缀，以便更好的显示
+                        if sub_name.lower().endswith('.lnk'):
+                            sub_name = sub_name[:-4]
+                        sub_display_name = f"{sub_name} (快捷方式)"
+                    else:
+                        sub_display_name = sub_name
                     
-                    self.report_progress(f"扫描段落 {sub_idx+1}/{len(sub_folders)}: {sub_name}", 
-                                      1 + progress_per_folder * idx + (progress_per_folder * sub_idx / len(sub_folders)))
+                    self.report_progress(
+                        f"扫描段落 {sub_idx+1}/{len(sub_folders)}: {sub_display_name}", 
+                        1 + progress_per_folder * idx + (progress_per_folder * sub_idx / len(sub_folders))
+                    )
                     
                     # 使用顺序编号作为键，确保段落按顺序排列
                     segment_key = f"{sub_idx+1:02d}_{sub_name}"
@@ -406,22 +468,32 @@ class VideoProcessor:
                         "segment_index": sub_idx,  # 存储段落索引，用于排序
                         "parent_folder": folder_name,  # 记录所属父文件夹
                         "is_shortcut": sub_folder_info["is_shortcut"],  # 记录是否为快捷方式
-                        "original_path": sub_folder_info["original_path"]  # 记录原始快捷方式路径
+                        "original_path": sub_folder_info["original_path"],  # 记录原始快捷方式路径
+                        "display_name": sub_display_name  # 用于显示的名称
                     }
                     
-                    # 扫描视频文件夹
-                    self._scan_media_folder(sub_path, segment_key, material_data)
+                    try:
+                        # 扫描视频文件夹
+                        self._scan_media_folder(sub_path, segment_key, material_data)
+                    except Exception as e:
+                        logger.error(f"扫描子文件夹时出错: {sub_path}, 错误: {str(e)}")
+                        # 继续处理其他子文件夹
             else:
                 # 原始模式：直接扫描所提供的文件夹
                 # 初始化素材数据
                 material_data[folder_name] = {
                     "videos": [],
                     "audios": [],
-                    "path": folder_path
+                    "path": folder_path,
+                    "display_name": folder_name
                 }
                 
-                # 扫描视频文件夹
-                self._scan_media_folder(folder_path, folder_name, material_data)
+                try:
+                    # 扫描视频文件夹
+                    self._scan_media_folder(folder_path, folder_name, material_data)
+                except Exception as e:
+                    logger.error(f"扫描素材文件夹时出错: {folder_path}, 错误: {str(e)}")
+                    # 继续处理其他文件夹
         
         return material_data
     
