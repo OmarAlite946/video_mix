@@ -321,12 +321,17 @@ class VideoProcessor:
         1. 直接导入独立场景文件夹（原有模式）
         2. 导入父文件夹，从中提取按顺序排列的子文件夹作为场景（新模式）
         
+        现在还支持使用快捷方式作为子文件夹，会自动解析到目标文件夹
+        
         Args:
             material_folders: 素材文件夹信息列表
             
         Returns:
             Dict[str, Dict[str, Any]]: 素材数据，按子文件夹顺序排列
         """
+        # 导入解析快捷方式的函数
+        from src.utils.file_utils import resolve_shortcut
+        
         material_data = {}
         
         # 计算每个文件夹的扫描进度
@@ -345,24 +350,48 @@ class VideoProcessor:
             # 获取子文件夹列表
             for item in os.listdir(folder_path):
                 item_path = os.path.join(folder_path, item)
-                if os.path.isdir(item_path):
+                
+                actual_path = item_path
+                is_shortcut = False
+                
+                # 检查是否是快捷方式
+                if item.lower().endswith('.lnk'):
+                    shortcut_target = resolve_shortcut(item_path)
+                    if shortcut_target:
+                        actual_path = shortcut_target
+                        is_shortcut = True
+                        logger.info(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
+                
+                # 检查实际路径是否是目录
+                if os.path.isdir(actual_path):
                     # 检查子文件夹是否包含标准结构（视频文件夹或配音文件夹）
-                    video_dir = os.path.join(item_path, "视频")
-                    audio_dir = os.path.join(item_path, "配音")
+                    video_dir = os.path.join(actual_path, "视频")
+                    audio_dir = os.path.join(actual_path, "配音")
                     if os.path.isdir(video_dir) or os.path.isdir(audio_dir):
-                        sub_folders.append(item_path)
+                        sub_folder_info = {
+                            "path": actual_path,
+                            "name": item,  # 保留原始名称，用于显示
+                            "is_shortcut": is_shortcut,
+                            "original_path": item_path if is_shortcut else None
+                        }
+                        sub_folders.append(sub_folder_info)
             
             # 如果找到符合条件的子文件夹，认为是父文件夹导入模式
             if sub_folders:
                 is_parent_folder = True
-                logger.info(f"检测到父文件夹导入模式，找到 {len(sub_folders)} 个子文件夹")
+                logger.info(f"检测到父文件夹导入模式，找到 {len(sub_folders)} 个子文件夹 (包含快捷方式: {sum(1 for sf in sub_folders if sf['is_shortcut'])})")
                 
                 # 对子文件夹按名称排序，确保按正确顺序处理
-                sub_folders.sort()
+                sub_folders.sort(key=lambda x: x["name"])
                 
                 # 逐个处理子文件夹
-                for sub_idx, sub_path in enumerate(sub_folders):
-                    sub_name = os.path.basename(sub_path)
+                for sub_idx, sub_folder_info in enumerate(sub_folders):
+                    sub_path = sub_folder_info["path"]
+                    sub_name = sub_folder_info["name"]
+                    
+                    if sub_folder_info["is_shortcut"]:
+                        sub_name = sub_name[:-4]  # 移除.lnk后缀，以便更好的显示
+                    
                     self.report_progress(f"扫描段落 {sub_idx+1}/{len(sub_folders)}: {sub_name}", 
                                       1 + progress_per_folder * idx + (progress_per_folder * sub_idx / len(sub_folders)))
                     
@@ -375,7 +404,9 @@ class VideoProcessor:
                         "audios": [],
                         "path": sub_path,
                         "segment_index": sub_idx,  # 存储段落索引，用于排序
-                        "parent_folder": folder_name  # 记录所属父文件夹
+                        "parent_folder": folder_name,  # 记录所属父文件夹
+                        "is_shortcut": sub_folder_info["is_shortcut"],  # 记录是否为快捷方式
+                        "original_path": sub_folder_info["original_path"]  # 记录原始快捷方式路径
                     }
                     
                     # 扫描视频文件夹

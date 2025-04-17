@@ -13,11 +13,45 @@ import tempfile
 import concurrent.futures
 import uuid
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Union, Callable
+from typing import List, Dict, Tuple, Optional, Union, Callable, Pattern, Set
 
 from utils.logger import get_logger
 
 logger = get_logger()
+
+# 视频和音频文件扩展名
+video_extensions = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm"}
+audio_extensions = {".mp3", ".wav", ".aac", ".ogg", ".flac", ".m4a"}
+
+def resolve_shortcut(shortcut_path: Union[str, Path]) -> Optional[str]:
+    """
+    解析Windows快捷方式(.lnk文件)，返回其目标路径
+    
+    Args:
+        shortcut_path: 快捷方式文件路径
+        
+    Returns:
+        Optional[str]: 快捷方式目标路径，如果解析失败则返回None
+    """
+    if not os.path.exists(shortcut_path) or not str(shortcut_path).lower().endswith('.lnk'):
+        return None
+        
+    try:
+        import win32com.client
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortCut(str(shortcut_path))
+        target_path = shortcut.Targetpath
+        
+        # 检查目标路径是否存在并且是目录
+        if target_path and os.path.exists(target_path) and os.path.isdir(target_path):
+            logger.info(f"解析快捷方式成功: {shortcut_path} -> {target_path}")
+            return target_path
+        else:
+            logger.warning(f"快捷方式目标不存在或不是目录: {shortcut_path} -> {target_path}")
+            return None
+    except Exception as e:
+        logger.warning(f"解析快捷方式失败 {shortcut_path}: {str(e)}")
+        return None
 
 def ensure_dir_exists(directory: Union[str, Path]) -> Path:
     """
@@ -114,11 +148,8 @@ def list_media_files(directory: Union[str, Path], recursive: bool = False) -> Di
     Returns:
         Dict[str, List[Path]]: {'videos': [...], 'audios': [...]}
     """
-    video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm']
-    audio_extensions = ['.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a']
-    
-    videos = list_files(directory, extensions=video_extensions, recursive=recursive)
-    audios = list_files(directory, extensions=audio_extensions, recursive=recursive)
+    videos = list_files(directory, extensions=list(video_extensions), recursive=recursive)
+    audios = list_files(directory, extensions=list(audio_extensions), recursive=recursive)
     
     return {
         'videos': videos,

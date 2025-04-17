@@ -32,7 +32,7 @@ from src.utils.cache_config import CacheConfig
 from src.hardware.system_analyzer import SystemAnalyzer
 from src.hardware.gpu_config import GPUConfig
 from src.utils.help_system import HelpSystem
-from src.utils.file_utils import list_media_files
+from src.utils.file_utils import list_media_files, resolve_shortcut
 
 logger = get_logger()
 
@@ -1593,6 +1593,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 递归扫描所有包含视频和音频的子文件夹
         import os
         from pathlib import Path
+        from src.utils.file_utils import resolve_shortcut
         
         added_count = 0
         skipped_count = 0
@@ -1601,13 +1602,24 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         for item in os.listdir(root_dir):
             item_path = os.path.join(root_dir, item)
             
-            # 只处理文件夹
-            if not os.path.isdir(item_path):
+            actual_path = item_path
+            is_shortcut = False
+            
+            # 检查是否是快捷方式
+            if item.lower().endswith('.lnk'):
+                shortcut_target = resolve_shortcut(item_path)
+                if shortcut_target:
+                    actual_path = shortcut_target
+                    is_shortcut = True
+                    print(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
+            
+            # 只处理文件夹(或解析后的快捷方式目标是文件夹)
+            if not os.path.isdir(actual_path):
                 continue
             
             # 检查是否有"视频"或"配音"子文件夹
-            has_video_folder = os.path.exists(os.path.join(item_path, "视频"))
-            has_audio_folder = os.path.exists(os.path.join(item_path, "配音"))
+            has_video_folder = os.path.exists(os.path.join(actual_path, "视频"))
+            has_audio_folder = os.path.exists(os.path.join(actual_path, "配音"))
             
             if has_video_folder or has_audio_folder:
                 # 检查子文件夹中是否有媒体文件
@@ -1615,11 +1627,11 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 audio_count = 0
                 
                 if has_video_folder:
-                    media = list_media_files(os.path.join(item_path, "视频"), recursive=True)
+                    media = list_media_files(os.path.join(actual_path, "视频"), recursive=True)
                     video_count = len(media['videos'])
                 
                 if has_audio_folder:
-                    media = list_media_files(os.path.join(item_path, "配音"), recursive=True)
+                    media = list_media_files(os.path.join(actual_path, "配音"), recursive=True)
                     audio_count = len(media['audios'])
                 
                 # 如果有媒体文件，则添加到素材列表
@@ -1627,9 +1639,16 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                     row_count = self.video_table.rowCount()
                     self.video_table.setRowCount(row_count + 1)
                     
+                    # 如果是快捷方式，显示名称时去掉.lnk后缀
+                    display_name = item
+                    if is_shortcut:
+                        if display_name.lower().endswith('.lnk'):
+                            display_name = display_name[:-4]
+                        display_name += " (快捷方式)"
+                    
                     self.video_table.setItem(row_count, 0, QTableWidgetItem(str(row_count + 1)))  # 序号
-                    self.video_table.setItem(row_count, 1, QTableWidgetItem(item))  # 素材名称
-                    self.video_table.setItem(row_count, 2, QTableWidgetItem(item_path))  # 素材路径
+                    self.video_table.setItem(row_count, 1, QTableWidgetItem(display_name))  # 素材名称
+                    self.video_table.setItem(row_count, 2, QTableWidgetItem(actual_path))  # 素材路径 (使用实际路径)
                     self.video_table.setItem(row_count, 3, QTableWidgetItem(str(video_count)))  # 视频数量
                     self.video_table.setItem(row_count, 4, QTableWidgetItem(str(audio_count)))  # 配音数量
                     self.video_table.setItem(row_count, 5, QTableWidgetItem("待处理"))  # 状态
