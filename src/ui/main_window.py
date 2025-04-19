@@ -303,13 +303,92 @@ class MainWindow(QMainWindow):
         bgm_layout.addWidget(self.edit_bgm_path)
         bgm_layout.addWidget(self.btn_browse_bgm)
         bgm_layout.addWidget(self.btn_play_bgm)
+        bgm_layout.addStretch()
         
         # 添加背景音乐帮助按钮
         HelpSystem.add_help_button(bgm_layout, "background_music")
         
         settings_layout.addRow(bgm_layout)
         
-        # 缓存目录
+        # 添加水印设置
+        watermark_group = QGroupBox("水印设置")
+        watermark_layout = QVBoxLayout(watermark_group)
+        
+        # 启用水印选项
+        enable_watermark_layout = QHBoxLayout()
+        self.chk_enable_watermark = QCheckBox("启用时间戳水印")
+        self.chk_enable_watermark.setChecked(False)
+        enable_watermark_layout.addWidget(self.chk_enable_watermark)
+        
+        # 添加水印帮助按钮
+        HelpSystem.add_help_button(enable_watermark_layout, "watermark")
+        enable_watermark_layout.addStretch()
+        watermark_layout.addLayout(enable_watermark_layout)
+        
+        # 水印自定义文字
+        watermark_text_layout = QHBoxLayout()
+        self.edit_watermark_prefix = QLineEdit()
+        self.edit_watermark_prefix.setPlaceholderText("自定义文字（可选）")
+        watermark_text_layout.addWidget(QLabel("自定义前缀:"))
+        watermark_text_layout.addWidget(self.edit_watermark_prefix)
+        watermark_layout.addLayout(watermark_text_layout)
+        
+        # 水印字体大小
+        font_size_layout = QHBoxLayout()
+        self.spin_watermark_size = QSpinBox()
+        self.spin_watermark_size.setRange(10, 100)
+        self.spin_watermark_size.setValue(24)
+        self.spin_watermark_size.setSuffix(" px")
+        font_size_layout.addWidget(QLabel("字体大小:"))
+        font_size_layout.addWidget(self.spin_watermark_size)
+        font_size_layout.addStretch()
+        watermark_layout.addLayout(font_size_layout)
+        
+        # 水印字体颜色
+        font_color_layout = QHBoxLayout()
+        self.combo_watermark_color = QComboBox()
+        self.combo_watermark_color.addItems(["白色", "黑色", "红色", "绿色", "蓝色", "黄色"])
+        self.btn_custom_color = QPushButton("自定义颜色")
+        self.watermark_color = "#FFFFFF"  # 默认白色
+        font_color_layout.addWidget(QLabel("字体颜色:"))
+        font_color_layout.addWidget(self.combo_watermark_color)
+        font_color_layout.addWidget(self.btn_custom_color)
+        font_color_layout.addStretch()
+        watermark_layout.addLayout(font_color_layout)
+        
+        # 水印位置
+        position_layout = QHBoxLayout()
+        self.combo_watermark_position = QComboBox()
+        self.combo_watermark_position.addItems(["右上角", "左上角", "右下角", "左下角", "中心"])
+        position_layout.addWidget(QLabel("水印位置:"))
+        position_layout.addWidget(self.combo_watermark_position)
+        position_layout.addStretch()
+        watermark_layout.addLayout(position_layout)
+        
+        # 自定义位置微调
+        position_adjust_layout = QHBoxLayout()
+        self.spin_pos_x = QSpinBox()
+        self.spin_pos_x.setRange(-100, 100)
+        self.spin_pos_x.setValue(0)
+        self.spin_pos_x.setSuffix(" px")
+        
+        self.spin_pos_y = QSpinBox()
+        self.spin_pos_y.setRange(-100, 100)
+        self.spin_pos_y.setValue(0)
+        self.spin_pos_y.setSuffix(" px")
+        
+        position_adjust_layout.addWidget(QLabel("位置微调: X"))
+        position_adjust_layout.addWidget(self.spin_pos_x)
+        position_adjust_layout.addWidget(QLabel("Y"))
+        position_adjust_layout.addWidget(self.spin_pos_y)
+        position_adjust_layout.addStretch()
+        watermark_layout.addLayout(position_adjust_layout)
+        
+        # 添加水印设置到主设置布局
+        settings_layout.addRow(watermark_group)
+        
+        # 缓存设置
+        cache_group = QGroupBox("缓存设置")
         cache_dir_layout = QHBoxLayout()
         self.edit_cache_dir = QLineEdit()
         self.edit_cache_dir.setText(self.cache_config.get_cache_dir())
@@ -506,6 +585,10 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 背景音乐
         self.btn_browse_bgm.clicked.connect(self.on_browse_bgm)
         self.btn_play_bgm.clicked.connect(self.on_play_bgm)
+        
+        # 水印设置
+        self.btn_custom_color.clicked.connect(self.on_choose_custom_color)
+        self.combo_watermark_color.currentTextChanged.connect(self.on_watermark_color_changed)
         
         # 缓存目录
         self.btn_browse_cache_dir.clicked.connect(self.on_browse_cache_dir)
@@ -1207,7 +1290,15 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             "bgm_volume": self.spin_bgm_volume.value(),
             "bgm_path": self.edit_bgm_path.text(),
             "transition": self.combo_transition.currentText(),
-            "generate_count": self.spin_generate_count.value()
+            "generate_count": self.spin_generate_count.value(),
+            # 添加水印参数
+            "watermark_enabled": self.chk_enable_watermark.isChecked(),
+            "watermark_prefix": self.edit_watermark_prefix.text(),
+            "watermark_size": self.spin_watermark_size.value(),
+            "watermark_color": self.watermark_color,
+            "watermark_position": self.combo_watermark_position.currentText(),
+            "watermark_pos_x": self.spin_pos_x.value(),
+            "watermark_pos_y": self.spin_pos_y.value()
         }
         return params
 
@@ -1271,7 +1362,15 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 "transition_duration": 0.5,  # 默认转场时长
                 "threads": 4,  # 默认线程数
                 "temp_dir": self.cache_config.get_cache_dir(),  # 使用缓存配置的目录
-                "video_mode": params["video_mode"]  # 添加视频模式参数
+                "video_mode": params["video_mode"],  # 添加视频模式参数
+                # 添加水印设置
+                "watermark_enabled": params["watermark_enabled"],
+                "watermark_prefix": params["watermark_prefix"],
+                "watermark_size": params["watermark_size"],
+                "watermark_color": params["watermark_color"],
+                "watermark_position": params["watermark_position"],
+                "watermark_pos_x": params["watermark_pos_x"],
+                "watermark_pos_y": params["watermark_pos_y"]
             }
             
             # 更新状态栏
@@ -2513,3 +2612,35 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         else:
             # 不需要在这里重置值，保留用户之前设置的比特率
             pass
+
+    # 添加自定义颜色选择方法
+    @pyqtSlot()
+    def on_choose_custom_color(self):
+        """选择自定义水印颜色"""
+        from PyQt5.QtWidgets import QColorDialog
+        from PyQt5.QtGui import QColor
+        
+        current_color = QColor(self.watermark_color)
+        color = QColorDialog.getColor(current_color, self, "选择水印颜色")
+        
+        if color.isValid():
+            self.watermark_color = color.name()
+            # 将combobox设置为自定义
+            if self.combo_watermark_color.findText("自定义") == -1:
+                self.combo_watermark_color.addItem("自定义")
+            self.combo_watermark_color.setCurrentText("自定义")
+    
+    @pyqtSlot(str)
+    def on_watermark_color_changed(self, color_name):
+        """处理水印颜色选择改变"""
+        color_map = {
+            "白色": "#FFFFFF",
+            "黑色": "#000000",
+            "红色": "#FF0000",
+            "绿色": "#00FF00",
+            "蓝色": "#0000FF",
+            "黄色": "#FFFF00"
+        }
+        
+        if color_name in color_map:
+            self.watermark_color = color_map[color_name]

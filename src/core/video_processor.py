@@ -57,7 +57,15 @@ class VideoProcessor:
             "voice_volume": 1.0,        # 配音音量
             "bgm_volume": 0.5,          # 背景音乐音量
             "output_format": "mp4",     # 输出格式
-            "temp_dir": cache_dir  # 使用配置的缓存目录
+            "temp_dir": cache_dir,      # 使用配置的缓存目录
+            # 添加水印相关默认设置
+            "watermark_enabled": False,  # 水印功能默认关闭
+            "watermark_prefix": "",      # 默认无自定义前缀
+            "watermark_size": 24,        # 默认字体大小24像素
+            "watermark_color": "#FFFFFF", # 默认白色
+            "watermark_position": "右上角", # 默认位置在右上角
+            "watermark_pos_x": 0,        # 默认X轴位置修正
+            "watermark_pos_y": 0         # 默认Y轴位置修正
         }
         
         # 更新设置
@@ -1016,6 +1024,40 @@ class VideoProcessor:
                         # 使用FFmpeg进行最终编码
                         success = self._encode_with_ffmpeg(temp_raw_video, output_path, self.settings["hardware_accel"], codec)
                         
+                        # 如果成功，并且启用了水印功能，则添加水印
+                        if success and self.settings.get("watermark_enabled", False):
+                            try:
+                                self.report_progress("正在添加时间戳水印...", progress_start + progress_range * 0.95)
+                                # 使用带水印的临时文件路径
+                                watermarked_output = self._create_temp_file("watermarked", ".mp4")
+                                # 添加水印到视频
+                                watermark_success = self._add_watermark_to_video(output_path, watermarked_output)
+                                
+                                if watermark_success:
+                                    # 使用临时文件替换原输出文件
+                                    try:
+                                        os.remove(output_path)
+                                    except Exception as e:
+                                        logger.warning(f"删除原输出文件失败: {str(e)}")
+                                        
+                                    try:
+                                        shutil.move(watermarked_output, output_path)
+                                        logger.info("成功添加水印并替换原输出文件")
+                                    except Exception as e:
+                                        logger.error(f"移动水印文件失败: {str(e)}")
+                                        # 如果移动失败，尝试直接复制
+                                        try:
+                                            shutil.copy2(watermarked_output, output_path)
+                                            os.remove(watermarked_output)
+                                            logger.info("使用复制方式替换原输出文件")
+                                        except Exception as copy_error:
+                                            logger.error(f"复制水印文件失败: {str(copy_error)}")
+                                else:
+                                    logger.warning("添加水印失败，将使用无水印版本")
+                            except Exception as e:
+                                logger.error(f"添加水印过程出错: {str(e)}")
+                                logger.warning("将使用无水印版本")
+                        
                         # 如果成功，删除临时文件并返回
                         if success:
                             try:
@@ -1889,4 +1931,161 @@ class VideoProcessor:
                 
         except Exception as e:
             logger.warning(f"检查视频文件有效性时出错: {str(e)}")
+            return False
+
+    def _get_watermark_text(self) -> str:
+        """
+        生成时间戳水印文本
+        
+        Returns:
+            str: 格式化的时间戳水印文本
+        """
+        # 获取当前时间
+        now = datetime.datetime.now()
+        # 格式化为 年.月日.时分
+        timestamp = now.strftime("%Y.%m%d.%H%M")
+        
+        # 检查是否有自定义前缀
+        prefix = self.settings.get("watermark_prefix", "")
+        if prefix:
+            return f"{prefix}{timestamp}"
+        else:
+            return timestamp
+
+    def _add_watermark_to_video(self, input_path: str, output_path: str) -> bool:
+        """
+        向视频添加时间戳水印
+        
+        Args:
+            input_path: 输入视频路径
+            output_path: 输出带水印的视频路径
+            
+        Returns:
+            bool: 是否成功添加水印
+        """
+        try:
+            # 获取FFmpeg命令
+            ffmpeg_cmd = self._get_ffmpeg_cmd()
+            if not ffmpeg_cmd:
+                logger.error("未找到FFmpeg命令，无法添加水印")
+                return False
+                
+            # 获取水印文本
+            watermark_text = self._get_watermark_text()
+            
+            # 检查同一分钟是否已有视频生成
+            # 如果有，则在时间戳后面添加编号，例如 (1), (2) 等
+            dir_path = os.path.dirname(output_path)
+            base_name = os.path.basename(output_path)
+            count = 0
+            
+            # 查找同一分钟生成的视频数量
+            for file in os.listdir(dir_path):
+                if file.endswith(".mp4") and watermark_text in file:
+                    count += 1
+            
+            # 如果已经有同一分钟的视频，则添加编号
+            if count > 0:
+                watermark_text = f"{watermark_text}({count})"
+            
+            # 获取水印设置
+            font_size = self.settings.get("watermark_size", 24)
+            font_color = self.settings.get("watermark_color", "#FFFFFF")
+            position = self.settings.get("watermark_position", "右上角")
+            pos_x_offset = self.settings.get("watermark_pos_x", 0)
+            pos_y_offset = self.settings.get("watermark_pos_y", 0)
+            
+            # 转换RGB颜色为十六进制，并去掉#前缀
+            if font_color.startswith("#"):
+                font_color = font_color[1:]
+            
+            # 获取视频分辨率
+            probe_cmd = [
+                ffmpeg_cmd, 
+                "-i", input_path,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=s=x:p=0"
+            ]
+            
+            # 处理Windows中文路径
+            if os.name == 'nt':
+                try:
+                    import win32api
+                    if os.path.exists(input_path):
+                        probe_cmd[2] = win32api.GetShortPathName(input_path)
+                except Exception as e:
+                    logger.warning(f"转换路径时出错: {str(e)}")
+            
+            # 获取视频尺寸
+            try:
+                result = subprocess.check_output(probe_cmd, universal_newlines=True).strip()
+                width, height = map(int, result.split('x'))
+            except Exception as e:
+                logger.error(f"获取视频尺寸失败: {str(e)}")
+                # 默认使用1080p尺寸
+                if "1080p" in self.settings.get("resolution", ""):
+                    if "竖屏" in self.settings.get("resolution", ""):
+                        width, height = 1080, 1920
+                    else:
+                        width, height = 1920, 1080
+                else:
+                    width, height = 1280, 720
+            
+            # 确定水印位置
+            positions = {
+                "右上角": f"x=w-tw-10{pos_x_offset:+}:y=10{pos_y_offset:+}",
+                "左上角": f"x=10{pos_x_offset:+}:y=10{pos_y_offset:+}",
+                "右下角": f"x=w-tw-10{pos_x_offset:+}:y=h-th-10{pos_y_offset:+}",
+                "左下角": f"x=10{pos_x_offset:+}:y=h-th-10{pos_y_offset:+}",
+                "中心": f"x=(w-tw)/2{pos_x_offset:+}:y=(h-th)/2{pos_y_offset:+}"
+            }
+            
+            # 获取对应位置的坐标表达式
+            position_expr = positions.get(position, positions["右上角"])
+            
+            # 构建FFmpeg命令
+            # 使用drawtext过滤器添加水印
+            drawtext_filter = f"drawtext=text='{watermark_text}':fontsize={font_size}:fontcolor=0x{font_color}:box=0:{position_expr}"
+            
+            # 完整的FFmpeg命令
+            cmd = [
+                ffmpeg_cmd,
+                "-i", input_path,
+                "-vf", drawtext_filter,
+                "-c:v", self.settings.get("encoder", "libx264"),
+                "-c:a", "copy",  # 复制音频，不重新编码
+                "-y",  # 覆盖已存在的文件
+                output_path
+            ]
+            
+            # 处理Windows中文路径
+            if os.name == 'nt':
+                try:
+                    import win32api
+                    if os.path.exists(input_path):
+                        cmd[2] = win32api.GetShortPathName(input_path)
+                except Exception as e:
+                    logger.warning(f"转换路径时出错: {str(e)}")
+            
+            # 记录命令并执行
+            cmd_str = " ".join(cmd)
+            logger.info(f"添加水印命令: {cmd_str}")
+            
+            result = subprocess.run(cmd, check=True)
+            
+            # 检查是否成功
+            if result.returncode == 0 and os.path.exists(output_path):
+                logger.info(f"成功添加水印: {watermark_text}")
+                return True
+            else:
+                logger.error("添加水印过程返回非零状态")
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            logger.error(f"添加水印时FFmpeg命令执行失败: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"添加水印时发生错误: {str(e)}")
             return False
