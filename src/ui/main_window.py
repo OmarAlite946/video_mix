@@ -33,6 +33,7 @@ from src.hardware.system_analyzer import SystemAnalyzer
 from src.hardware.gpu_config import GPUConfig
 from src.utils.help_system import HelpSystem
 from src.utils.file_utils import list_media_files, resolve_shortcut
+from src.utils.user_settings import UserSettings  # 导入用户设置类
 
 logger = get_logger()
 
@@ -55,6 +56,9 @@ class MainWindow(QMainWindow):
         # 初始化缓存配置
         self.cache_config = CacheConfig()
         
+        # 初始化用户设置
+        self.user_settings = UserSettings()
+        
         # 初始化界面
         self._init_ui()
         
@@ -66,6 +70,9 @@ class MainWindow(QMainWindow):
         
         # 初始化状态栏
         self._init_statusbar()
+        
+        # 加载用户设置
+        self._load_user_settings()
         
         # 检测GPU（软件启动时自动检测一次）
         self.detect_gpu()
@@ -571,7 +578,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         QMessageBox.about(self, "关于", about_text)
     
     def _connect_signals(self):
-        """连接信号槽"""
+        """连接信号和槽"""
         # 素材操作
         self.btn_add_material.clicked.connect(self.on_add_material)
         self.btn_batch_import.clicked.connect(self.on_batch_import)
@@ -601,6 +608,80 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 合成控制
         self.btn_start_compose.clicked.connect(self.on_start_compose)
         self.btn_stop_compose.clicked.connect(self.on_stop_compose)
+        
+        # 连接设置值变化的信号到设置保存方法
+        # 分辨率
+        self.combo_resolution.currentTextChanged.connect(
+            lambda text: self.user_settings.set_setting("resolution", text)
+        )
+        
+        # 比特率
+        self.spin_bitrate.valueChanged.connect(
+            lambda value: self.user_settings.set_setting("bitrate", value)
+        )
+        
+        # 原始比特率
+        self.chk_original_bitrate.toggled.connect(
+            lambda checked: self.user_settings.set_setting("original_bitrate", checked)
+        )
+        
+        # 转场效果
+        self.combo_transition.currentTextChanged.connect(
+            lambda text: self.user_settings.set_setting("transition", text)
+        )
+        
+        # GPU选择
+        self.combo_gpu.currentTextChanged.connect(
+            lambda text: self.user_settings.set_setting("gpu", text)
+        )
+        
+        # 水印启用状态
+        self.chk_enable_watermark.toggled.connect(
+            lambda checked: self.user_settings.set_setting("watermark_enabled", checked)
+        )
+        
+        # 水印前缀
+        self.edit_watermark_prefix.textChanged.connect(
+            lambda text: self.user_settings.set_setting("watermark_prefix", text)
+        )
+        
+        # 水印大小
+        self.spin_watermark_size.valueChanged.connect(
+            lambda value: self.user_settings.set_setting("watermark_size", value)
+        )
+        
+        # 水印位置
+        self.combo_watermark_position.currentTextChanged.connect(
+            lambda text: self.user_settings.set_setting("watermark_position", text)
+        )
+        
+        # 水印坐标
+        self.spin_pos_x.valueChanged.connect(
+            lambda value: self.user_settings.set_setting("watermark_pos_x", value)
+        )
+        
+        self.spin_pos_y.valueChanged.connect(
+            lambda value: self.user_settings.set_setting("watermark_pos_y", value)
+        )
+        
+        # 音量设置
+        self.spin_voice_volume.valueChanged.connect(
+            lambda value: self.user_settings.set_setting("voice_volume", value)
+        )
+        
+        self.spin_bgm_volume.valueChanged.connect(
+            lambda value: self.user_settings.set_setting("bgm_volume", value)
+        )
+        
+        # 生成数量
+        self.spin_generate_count.valueChanged.connect(
+            lambda value: self.user_settings.set_setting("generate_count", value)
+        )
+        
+        # 编码模式
+        self.combo_encode_mode.currentTextChanged.connect(
+            lambda text: self.user_settings.set_setting("encode_mode", text)
+        )
     
     @pyqtSlot()
     def on_add_material(self):
@@ -644,13 +725,24 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
     
     @pyqtSlot()
     def on_browse_save_dir(self):
-        """浏览保存目录"""
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择保存目录", "", QFileDialog.ShowDirsOnly
+        """浏览并选择保存目录"""
+        # 获取当前保存目录作为初始目录
+        current_dir = self.edit_save_dir.text()
+        
+        # 如果当前没有设置目录，则使用上次保存的目录
+        if not current_dir:
+            current_dir = self.user_settings.get_setting("save_dir", "")
+        
+        save_dir = QFileDialog.getExistingDirectory(
+            self, 
+            "选择保存目录", 
+            current_dir
         )
         
-        if folder:
-            self.edit_save_dir.setText(folder)
+        if save_dir:
+            self.edit_save_dir.setText(save_dir)
+            # 保存保存目录到用户设置
+            self.user_settings.set_setting("save_dir", save_dir)
     
     @pyqtSlot()
     def on_open_save_dir(self):
@@ -670,13 +762,30 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
     
     @pyqtSlot()
     def on_browse_bgm(self):
-        """选择背景音乐文件"""
-        file, _ = QFileDialog.getOpenFileName(
-            self, "选择背景音乐", "", "音频文件 (*.mp3 *.wav *.flac *.ogg *.m4a)"
+        """浏览并选择背景音乐"""
+        # 获取当前BGM路径的目录作为初始目录
+        current_bgm = self.edit_bgm_path.text()
+        initial_dir = ""
+        
+        if current_bgm and os.path.exists(current_bgm):
+            initial_dir = os.path.dirname(current_bgm)
+        else:
+            # 如果当前没有设置或路径不存在，则使用上次保存的BGM目录
+            last_bgm = self.user_settings.get_setting("bgm_path", "")
+            if last_bgm and os.path.exists(last_bgm):
+                initial_dir = os.path.dirname(last_bgm)
+        
+        bgm_file, _ = QFileDialog.getOpenFileName(
+            self, 
+            "选择背景音乐", 
+            initial_dir, 
+            "音频文件 (*.mp3 *.wav *.ogg *.flac *.m4a);;所有文件 (*.*)"
         )
         
-        if file:
-            self.edit_bgm_path.setText(file)
+        if bgm_file:
+            self.edit_bgm_path.setText(bgm_file)
+            # 保存BGM路径到用户设置
+            self.user_settings.set_setting("bgm_path", bgm_file)
     
     @pyqtSlot()
     def on_play_bgm(self):
@@ -1684,155 +1793,37 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
     @pyqtSlot()
     def on_batch_import(self):
         """批量导入素材文件夹"""
-        # 选择根目录
-        root_dir = QFileDialog.getExistingDirectory(self, "选择素材根目录")
+        # 获取上次导入的文件夹路径作为默认路径
+        last_import_folder = self.user_settings.get_setting("import_folder", "")
+        
+        # 选择根目录，如果有上次的路径则使用它作为初始目录
+        root_dir = QFileDialog.getExistingDirectory(
+            self, 
+            "选择素材根目录", 
+            last_import_folder
+        )
+        
         if not root_dir:
             return
         
-        # 递归扫描所有包含视频和音频的子文件夹
-        import os
-        from pathlib import Path
-        from src.utils.file_utils import resolve_shortcut
-        from src.utils.logger import get_logger
+        # 保存导入的文件夹路径到用户设置
+        self.user_settings.set_setting("import_folder", root_dir)
         
-        logger = get_logger()
+        # 清空当前列表
+        self.video_table.setRowCount(0)
         
-        added_count = 0
-        skipped_count = 0
-        normal_count = 0
-        shortcut_count = 0
-        shortcut_errors = 0
+        # 使用_import_material_folder方法导入文件夹
+        self._import_material_folder(root_dir)
         
-        # 设置鼠标等待状态
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        
-        try:
-            # 遍历根目录下的所有子文件夹
-            for item in os.listdir(root_dir):
-                item_path = os.path.join(root_dir, item)
-                
-                actual_path = item_path
-                is_shortcut = False
-                
-                # 检查是否是快捷方式
-                if item.lower().endswith('.lnk'):
-                    logger.info(f"发现可能的快捷方式: {item_path}")
-                    shortcut_target = resolve_shortcut(item_path)
-                    if shortcut_target:
-                        actual_path = shortcut_target
-                        is_shortcut = True
-                        shortcut_count += 1
-                        logger.info(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
-                    else:
-                        shortcut_errors += 1
-                        logger.warning(f"无法解析快捷方式: {item_path}")
-                        continue
-                elif os.path.isdir(item_path):
-                    normal_count += 1
-                else:
-                    logger.debug(f"跳过非文件夹项目: {item_path}")
-                    continue
-                
-                # 只处理文件夹(或解析后的快捷方式目标是文件夹)
-                if not os.path.isdir(actual_path):
-                    logger.warning(f"项目不是目录，跳过: {actual_path}")
-                    continue
-                
-                # 检查是否有"视频"或"配音"子文件夹
-                has_video_folder = os.path.exists(os.path.join(actual_path, "视频"))
-                has_audio_folder = os.path.exists(os.path.join(actual_path, "配音"))
-                
-                if has_video_folder or has_audio_folder:
-                    # 检查子文件夹中是否有媒体文件
-                    video_count = 0
-                    audio_count = 0
-                    
-                    if has_video_folder:
-                        try:
-                            media = list_media_files(os.path.join(actual_path, "视频"), recursive=True)
-                            video_count = len(media['videos'])
-                        except Exception as e:
-                            logger.error(f"扫描视频文件夹失败: {str(e)}")
-                    
-                    if has_audio_folder:
-                        try:
-                            media = list_media_files(os.path.join(actual_path, "配音"), recursive=True)
-                            audio_count = len(media['audios'])
-                        except Exception as e:
-                            logger.error(f"扫描音频文件夹失败: {str(e)}")
-                    
-                    # 如果有媒体文件，则添加到素材列表
-                    if video_count > 0 or audio_count > 0:
-                        row_count = self.video_table.rowCount()
-                        self.video_table.setRowCount(row_count + 1)
-                        
-                        # 如果是快捷方式，显示名称时去掉.lnk后缀
-                        display_name = item
-                        if is_shortcut:
-                            if display_name.lower().endswith('.lnk'):
-                                display_name = display_name[:-4]
-                            display_name += " (快捷方式)"
-                        
-                        # 添加图标以区分本体和快捷方式
-                        folder_item = QTableWidgetItem(display_name)
-                        if is_shortcut:
-                            # 使用Qt内置图标
-                            folder_item.setIcon(QApplication.style().standardIcon(QStyle.SP_FileLinkIcon))
-                        else:
-                            folder_item.setIcon(QApplication.style().standardIcon(QStyle.SP_DirIcon))
-                        
-                        self.video_table.setItem(row_count, 0, QTableWidgetItem(str(row_count + 1)))  # 序号
-                        self.video_table.setItem(row_count, 1, folder_item)  # 素材名称（带图标）
-                        self.video_table.setItem(row_count, 2, QTableWidgetItem(actual_path))  # 素材路径 (使用实际路径)
-                        
-                        # 如果是快捷方式，添加原始路径信息
-                        tooltip = f"实际路径: {actual_path}"
-                        if is_shortcut:
-                            tooltip = f"快捷方式: {item_path}\n{tooltip}"
-                        folder_item.setToolTip(tooltip)
-                        
-                        self.video_table.setItem(row_count, 3, QTableWidgetItem(str(video_count)))  # 视频数量
-                        self.video_table.setItem(row_count, 4, QTableWidgetItem(str(audio_count)))  # 配音数量
-                        self.video_table.setItem(row_count, 5, QTableWidgetItem("待处理"))  # 状态
-                        
-                        added_count += 1
-                    else:
-                        skipped_count += 1
-                        logger.warning(f"跳过没有媒体文件的素材文件夹: {actual_path}")
-                else:
-                    skipped_count += 1
-                    logger.warning(f"跳过没有视频或配音子文件夹的素材文件夹: {actual_path}")
-        except Exception as e:
-            logger.error(f"批量导入时出错: {str(e)}")
-            QMessageBox.critical(self, "导入错误", f"扫描素材文件夹时出错:\n{str(e)}")
-        finally:
-            # 恢复鼠标状态
-            QApplication.restoreOverrideCursor()
-        
-        # 记录混合情况的信息
-        if normal_count > 0 and shortcut_count > 0:
-            logger.info(f"批量导入: 检测到混合模式，包含 {normal_count} 个普通文件夹和 {shortcut_count} 个快捷方式")
-        elif shortcut_count > 0:
-            logger.info(f"批量导入: 检测到纯快捷方式模式，包含 {shortcut_count} 个快捷方式")
-        else:
-            logger.info(f"批量导入: 检测到标准模式，包含 {normal_count} 个普通文件夹")
-        
-        if added_count > 0:
-            # 创建更详细的导入结果消息
-            import_message = f"成功导入 {added_count} 个素材文件夹\n跳过 {skipped_count} 个不包含媒体文件的文件夹"
-            
-            # 添加混合模式信息
-            if normal_count > 0 and shortcut_count > 0:
-                import_message += f"\n\n导入细节:\n- {normal_count} 个普通文件夹\n- {shortcut_count} 个快捷方式文件夹"
-            
-            # 添加快捷方式错误信息
-            if shortcut_errors > 0:
-                import_message += f"\n\n警告: {shortcut_errors} 个快捷方式无法正确解析"
-            
+        # 显示导入结果
+        # 这里不需要弹窗，因为_import_material_folder方法会记录日志
+        # 但是为了保持与原来的行为一致，我们仍然显示弹窗
+        imported_rows = self.video_table.rowCount()
+        if imported_rows > 0:
             QMessageBox.information(
                 self, 
                 "批量导入完成", 
-                import_message
+                f"成功导入 {imported_rows} 个素材文件夹"
             )
         else:
             QMessageBox.warning(
@@ -2630,7 +2621,6 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
                 self.combo_watermark_color.addItem("自定义")
             self.combo_watermark_color.setCurrentText("自定义")
     
-    @pyqtSlot(str)
     def on_watermark_color_changed(self, color_name):
         """处理水印颜色选择改变"""
         color_map = {
@@ -2639,8 +2629,301 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             "红色": "#FF0000",
             "绿色": "#00FF00",
             "蓝色": "#0000FF",
-            "黄色": "#FFFF00"
+            "黄色": "#FFFF00",
+            "紫色": "#800080",
+            "青色": "#00FFFF",
+            "橙色": "#FFA500",
+            "粉色": "#FFC0CB",
+            "自定义": self.watermark_color  # 使用上次的自定义颜色
         }
         
         if color_name in color_map:
             self.watermark_color = color_map[color_name]
+            # 更新颜色按钮
+            self._update_color_button(self.watermark_color)
+    
+    def _update_color_button(self, color_hex):
+        """更新颜色按钮的背景色"""
+        try:
+            from PyQt5.QtGui import QColor
+            # 查找自定义颜色按钮
+            if hasattr(self, 'btn_custom_color'):
+                # 设置按钮背景色
+                style = f"background-color: {color_hex}; border: 1px solid #888888;"
+                self.btn_custom_color.setStyleSheet(style)
+                
+                # 根据颜色亮度决定文字颜色
+                color = QColor(color_hex)
+                luminance = (0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()) / 255
+                text_color = "black" if luminance > 0.5 else "white"
+                
+                # 更新按钮文字颜色
+                style = f"background-color: {color_hex}; color: {text_color}; border: 1px solid #888888;"
+                self.btn_custom_color.setStyleSheet(style)
+        except Exception as e:
+            logger.error(f"更新颜色按钮时出错: {e}")
+
+    # 在类中添加用户设置加载和保存的方法
+    def _load_user_settings(self):
+        """加载用户设置并应用到界面控件"""
+        logger.info("正在加载用户设置...")
+        
+        # 获取保存目录
+        save_dir = self.user_settings.get_setting("save_dir", "")
+        if save_dir and os.path.exists(save_dir):
+            self.edit_save_dir.setText(save_dir)
+        
+        # 获取分辨率设置
+        resolution = self.user_settings.get_setting("resolution", "竖屏 1080x1920")
+        index = self.combo_resolution.findText(resolution)
+        if index >= 0:
+            self.combo_resolution.setCurrentIndex(index)
+        
+        # 获取比特率设置
+        bitrate = self.user_settings.get_setting("bitrate", 5000)
+        self.spin_bitrate.setValue(bitrate)
+        
+        # 获取原始比特率设置
+        original_bitrate = self.user_settings.get_setting("original_bitrate", False)
+        self.chk_original_bitrate.setChecked(original_bitrate)
+        
+        # 获取转场效果设置
+        transition = self.user_settings.get_setting("transition", "不使用转场")
+        index = self.combo_transition.findText(transition)
+        if index >= 0:
+            self.combo_transition.setCurrentIndex(index)
+        
+        # 获取GPU设置
+        gpu = self.user_settings.get_setting("gpu", "自动检测")
+        index = self.combo_gpu.findText(gpu)
+        if index >= 0:
+            self.combo_gpu.setCurrentIndex(index)
+        
+        # 获取水印设置
+        watermark_enabled = self.user_settings.get_setting("watermark_enabled", False)
+        self.chk_enable_watermark.setChecked(watermark_enabled)
+        
+        watermark_prefix = self.user_settings.get_setting("watermark_prefix", "")
+        self.edit_watermark_prefix.setText(watermark_prefix)
+        
+        watermark_size = self.user_settings.get_setting("watermark_size", 36)
+        self.spin_watermark_size.setValue(watermark_size)
+        
+        watermark_color = self.user_settings.get_setting("watermark_color", "#FFFFFF")
+        self.watermark_color = watermark_color
+        self._update_color_button(watermark_color)
+        
+        watermark_position = self.user_settings.get_setting("watermark_position", "右下角")
+        index = self.combo_watermark_position.findText(watermark_position)
+        if index >= 0:
+            self.combo_watermark_position.setCurrentIndex(index)
+        
+        watermark_pos_x = self.user_settings.get_setting("watermark_pos_x", 10)
+        self.spin_pos_x.setValue(watermark_pos_x)
+        
+        watermark_pos_y = self.user_settings.get_setting("watermark_pos_y", 10)
+        self.spin_pos_y.setValue(watermark_pos_y)
+        
+        # 获取音量设置
+        voice_volume = self.user_settings.get_setting("voice_volume", 100)
+        self.spin_voice_volume.setValue(voice_volume)
+        
+        bgm_volume = self.user_settings.get_setting("bgm_volume", 50)
+        self.spin_bgm_volume.setValue(bgm_volume)
+        
+        # 获取BGM路径
+        bgm_path = self.user_settings.get_setting("bgm_path", "")
+        if bgm_path and os.path.exists(bgm_path):
+            self.edit_bgm_path.setText(bgm_path)
+        
+        # 获取生成数量
+        generate_count = self.user_settings.get_setting("generate_count", 1)
+        self.spin_generate_count.setValue(generate_count)
+        
+        # 获取编码模式
+        encode_mode = self.user_settings.get_setting("encode_mode", "标准模式")
+        index = self.combo_encode_mode.findText(encode_mode)
+        if index >= 0:
+            self.combo_encode_mode.setCurrentIndex(index)
+        
+        # 自动导入上次的素材文件夹
+        last_import_folder = self.user_settings.get_setting("import_folder", "")
+        if last_import_folder and os.path.exists(last_import_folder):
+            logger.info(f"自动导入上次的素材文件夹: {last_import_folder}")
+            # 清空当前列表
+            self.video_table.setRowCount(0)
+            # 使用延迟导入，避免阻塞UI
+            QtCore.QTimer.singleShot(200, lambda: self._import_material_folder(last_import_folder))
+        
+        logger.info("用户设置加载完成")
+    
+    def _import_material_folder(self, root_dir):
+        """导入指定的素材文件夹"""
+        if not root_dir or not os.path.exists(root_dir):
+            return
+            
+        from src.utils.file_utils import resolve_shortcut
+        from src.utils.logger import get_logger
+        
+        logger = get_logger()
+        
+        added_count = 0
+        skipped_count = 0
+        normal_count = 0
+        shortcut_count = 0
+        shortcut_errors = 0
+        
+        # 设置鼠标等待状态
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        
+        try:
+            # 遍历根目录下的所有子文件夹
+            for item in os.listdir(root_dir):
+                item_path = os.path.join(root_dir, item)
+                
+                actual_path = item_path
+                is_shortcut = False
+                
+                # 检查是否是快捷方式
+                if item.lower().endswith('.lnk'):
+                    logger.info(f"发现可能的快捷方式: {item_path}")
+                    shortcut_target = resolve_shortcut(item_path)
+                    if shortcut_target:
+                        actual_path = shortcut_target
+                        is_shortcut = True
+                        shortcut_count += 1
+                        logger.info(f"检测到快捷方式子文件夹: {item_path} -> {actual_path}")
+                    else:
+                        shortcut_errors += 1
+                        logger.warning(f"无法解析快捷方式: {item_path}")
+                        continue
+                elif os.path.isdir(item_path):
+                    normal_count += 1
+                else:
+                    logger.debug(f"跳过非文件夹项目: {item_path}")
+                    continue
+                
+                # 只处理文件夹(或解析后的快捷方式目标是文件夹)
+                if not os.path.isdir(actual_path):
+                    logger.warning(f"项目不是目录，跳过: {actual_path}")
+                    continue
+                
+                # 检查是否有"视频"或"配音"子文件夹
+                has_video_folder = os.path.exists(os.path.join(actual_path, "视频"))
+                has_audio_folder = os.path.exists(os.path.join(actual_path, "配音"))
+                
+                if has_video_folder or has_audio_folder:
+                    # 检查子文件夹中是否有媒体文件
+                    video_count = 0
+                    audio_count = 0
+                    
+                    if has_video_folder:
+                        try:
+                            media = list_media_files(os.path.join(actual_path, "视频"), recursive=True)
+                            video_count = len(media['videos'])
+                        except Exception as e:
+                            logger.error(f"扫描视频文件夹失败: {str(e)}")
+                    
+                    if has_audio_folder:
+                        try:
+                            media = list_media_files(os.path.join(actual_path, "配音"), recursive=True)
+                            audio_count = len(media['audios'])
+                        except Exception as e:
+                            logger.error(f"扫描音频文件夹失败: {str(e)}")
+                    
+                    # 如果有媒体文件，则添加到素材列表
+                    if video_count > 0 or audio_count > 0:
+                        row_count = self.video_table.rowCount()
+                        self.video_table.setRowCount(row_count + 1)
+                        
+                        # 如果是快捷方式，显示名称时去掉.lnk后缀
+                        display_name = item
+                        if is_shortcut:
+                            if display_name.lower().endswith('.lnk'):
+                                display_name = display_name[:-4]
+                            display_name += " (快捷方式)"
+                        
+                        # 添加图标以区分本体和快捷方式
+                        folder_item = QTableWidgetItem(display_name)
+                        if is_shortcut:
+                            # 使用Qt内置图标
+                            folder_item.setIcon(QApplication.style().standardIcon(QStyle.SP_FileLinkIcon))
+                        else:
+                            folder_item.setIcon(QApplication.style().standardIcon(QStyle.SP_DirIcon))
+                        
+                        self.video_table.setItem(row_count, 0, QTableWidgetItem(str(row_count + 1)))  # 序号
+                        self.video_table.setItem(row_count, 1, folder_item)  # 素材名称（带图标）
+                        self.video_table.setItem(row_count, 2, QTableWidgetItem(actual_path))  # 素材路径 (使用实际路径)
+                        
+                        # 如果是快捷方式，添加原始路径信息
+                        tooltip = f"实际路径: {actual_path}"
+                        if is_shortcut:
+                            tooltip = f"快捷方式: {item_path}\n{tooltip}"
+                        folder_item.setToolTip(tooltip)
+                        
+                        self.video_table.setItem(row_count, 3, QTableWidgetItem(str(video_count)))  # 视频数量
+                        self.video_table.setItem(row_count, 4, QTableWidgetItem(str(audio_count)))  # 配音数量
+                        self.video_table.setItem(row_count, 5, QTableWidgetItem("待处理"))  # 状态
+                        
+                        added_count += 1
+                    else:
+                        skipped_count += 1
+                        logger.warning(f"跳过没有媒体文件的素材文件夹: {actual_path}")
+                else:
+                    skipped_count += 1
+                    logger.warning(f"跳过没有视频或配音子文件夹的素材文件夹: {actual_path}")
+        except Exception as e:
+            logger.error(f"导入素材文件夹时出错: {str(e)}")
+        finally:
+            # 恢复鼠标状态
+            QApplication.restoreOverrideCursor()
+        
+        # 记录导入情况的信息
+        if added_count > 0:
+            logger.info(f"自动导入完成: 成功导入 {added_count} 个素材文件夹，跳过 {skipped_count} 个不符合条件的文件夹")
+            # 记录混合情况的信息
+            if normal_count > 0 and shortcut_count > 0:
+                logger.info(f"自动导入: 检测到混合模式，包含 {normal_count} 个普通文件夹和 {shortcut_count} 个快捷方式")
+            elif shortcut_count > 0:
+                logger.info(f"自动导入: 检测到纯快捷方式模式，包含 {shortcut_count} 个快捷方式")
+            else:
+                logger.info(f"自动导入: 检测到标准模式，包含 {normal_count} 个普通文件夹")
+        else:
+            logger.warning(f"自动导入: 未找到符合条件的素材文件夹，路径: {root_dir}")
+    
+    def _save_user_settings(self):
+        """保存当前界面设置到用户配置"""
+        logger.info("正在保存用户设置...")
+        
+        # 准备设置字典
+        settings = {
+            "save_dir": self.edit_save_dir.text(),
+            "resolution": self.combo_resolution.currentText(),
+            "bitrate": self.spin_bitrate.value(),
+            "original_bitrate": self.chk_original_bitrate.isChecked(),
+            "transition": self.combo_transition.currentText(),
+            "gpu": self.combo_gpu.currentText(),
+            "watermark_enabled": self.chk_enable_watermark.isChecked(),
+            "watermark_prefix": self.edit_watermark_prefix.text(),
+            "watermark_size": self.spin_watermark_size.value(),
+            "watermark_color": self.watermark_color,
+            "watermark_position": self.combo_watermark_position.currentText(),
+            "watermark_pos_x": self.spin_pos_x.value(),
+            "watermark_pos_y": self.spin_pos_y.value(),
+            "voice_volume": self.spin_voice_volume.value(),
+            "bgm_volume": self.spin_bgm_volume.value(),
+            "bgm_path": self.edit_bgm_path.text(),
+            "generate_count": self.spin_generate_count.value(),
+            "encode_mode": self.combo_encode_mode.currentText()
+        }
+        
+        # 批量保存设置
+        self.user_settings.set_multiple_settings(settings)
+        logger.info("用户设置保存完成")
+
+    def closeEvent(self, event):
+        """窗口关闭事件，保存用户设置"""
+        # 保存当前设置
+        self._save_user_settings()
+        # 继续默认的关闭行为
+        super().closeEvent(event)
