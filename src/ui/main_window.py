@@ -21,7 +21,8 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QSpinBox, QDoubleSpinBox, 
     QProgressBar, QComboBox, QTabWidget, QGroupBox, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-    QCheckBox, QStatusBar, QAction, QMenu, QTextEdit, QDialog, QApplication, QStyle
+    QCheckBox, QStatusBar, QAction, QMenu, QTextEdit, QDialog, QApplication, QStyle,
+    QSplitter, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QMetaObject, Q_ARG, Qt
 from PyQt5 import QtCore
@@ -95,12 +96,116 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_compose, "合成任务")
         
         # 创建"合成任务"选项卡的布局
-        compose_layout = QVBoxLayout(self.tab_compose)
+        compose_layout = QHBoxLayout(self.tab_compose)
+        compose_layout.setContentsMargins(3, 3, 3, 3)
+        compose_layout.setSpacing(5)
         
-        # 视频列表区域
+        # =========================================
+        # 左侧 - 材料列表区域 (占80%，原先是70%)
+        # =========================================
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(5)
+        
+        # 添加到主布局，设置宽度比例
+        compose_layout.addWidget(left_widget, 80)  # 从70增加到80
+        
+        # 工具栏 - 更加紧凑的横向布局
+        toolbar_layout = QHBoxLayout()
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(5)
+        
+        # 合成控制区域（移到红框位置）
+        compose_control_layout = QHBoxLayout()
+        compose_control_layout.setContentsMargins(5, 5, 5, 5)
+        compose_control_layout.setSpacing(10)
+        
+        # 文件夹名称和控制按钮水平排列
+        folder_control_layout = QHBoxLayout()
+        
+        # 添加父文件夹名称标题显示（红框位置）
+        self.parent_folder_title = QLabel("未选择文件夹")
+        self.parent_folder_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.parent_folder_title.setStyleSheet("""
+            font-size: 16px; 
+            font-weight: bold; 
+            color: #333333;
+            padding-left: 8px;
+        """)
+        self.parent_folder_title.setMinimumHeight(40)
+        
+        # 合成按钮和状态
+        self.btn_start_compose = QPushButton("开始合成")
+        self.btn_start_compose.setMinimumWidth(100)
+        self.btn_start_compose.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        
+        self.btn_stop_compose = QPushButton("停止合成")
+        self.btn_stop_compose.setMinimumWidth(100)
+        self.btn_stop_compose.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        
+        # 设置默认禁用停止按钮
+        self.btn_stop_compose.setEnabled(False)
+        
+        # 进度条和状态文本
+        progress_status_layout = QVBoxLayout()
+        progress_status_layout.setContentsMargins(0, 0, 0, 0)
+        progress_status_layout.setSpacing(2)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setMinimumWidth(250)
+        
+        self.label_progress = QLabel("等待合成任务...")
+        self.label_progress.setStyleSheet("color: #666666;")
+        
+        progress_status_layout.addWidget(self.progress_bar)
+        progress_status_layout.addWidget(self.label_progress)
+        
+        # 添加文件夹名称到水平布局的左侧
+        folder_control_layout.addWidget(self.parent_folder_title, 1)
+        
+        # 添加合成按钮和进度条到水平布局的右侧
+        compose_buttons_layout = QHBoxLayout()
+        compose_buttons_layout.addWidget(self.btn_start_compose)
+        compose_buttons_layout.addWidget(self.btn_stop_compose)
+        
+        folder_control_layout.addLayout(compose_buttons_layout)
+        folder_control_layout.addLayout(progress_status_layout)
+        
+        # 将整个合成控制区域添加到左侧布局
+        left_layout.addLayout(folder_control_layout)
+        
+        # 创建分割器，允许用户调整素材列表的大小
+        splitter = QSplitter(Qt.Vertical)
+        left_layout.addWidget(splitter, 1)  # 让分割器占据剩余空间
+        
+        # 视频列表区域 - 添加到分割器
         list_group = QGroupBox("素材列表")
-        compose_layout.addWidget(list_group)
-        
         list_layout = QVBoxLayout(list_group)
         
         # 创建视频列表表格
@@ -109,6 +214,8 @@ class MainWindow(QMainWindow):
         self.video_table.setHorizontalHeaderLabels(["序号", "场景名称", "路径", "视频数量", "配音数量", "状态"])
         self.video_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.video_table.verticalHeader().setVisible(False)
+        self.video_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.video_table.setMinimumHeight(200)  # 设置最小高度
         list_layout.addWidget(self.video_table)
         
         # 素材操作按钮
@@ -132,6 +239,9 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_refresh_material)
         btn_layout.addWidget(self.btn_clear_material)
         
+        # 将素材列表添加到分割器
+        splitter.addWidget(list_group)
+        
         # 合成设置区域
         settings_group = QGroupBox("合成设置")
         compose_layout.addWidget(settings_group)
@@ -151,6 +261,12 @@ class MainWindow(QMainWindow):
         HelpSystem.add_help_button(mode_layout, "compose_mode")
         
         settings_layout.addRow(mode_layout)
+        
+        # 添加其他选项卡
+        self.tabs.addTab(QWidget(), "字幕院线")
+        self.tabs.addTab(QWidget(), "导出院线")
+        self.tabs.addTab(QWidget(), "识别配音")
+        self.tabs.addTab(QWidget(), "视频分割")
         
         # 分辨率设置
         resolution_layout = QHBoxLayout()
@@ -429,43 +545,6 @@ class MainWindow(QMainWindow):
         HelpSystem.add_help_button(count_layout, "generate_count")
         
         settings_layout.addRow(count_layout)
-        
-        # 操作按钮
-        btn_control_layout = QHBoxLayout()
-        compose_layout.addLayout(btn_control_layout)
-        
-        self.btn_start_compose = QPushButton("开始合成")
-        self.btn_stop_compose = QPushButton("停止合成")
-        
-        btn_control_layout.addStretch()
-        btn_control_layout.addWidget(self.btn_start_compose)
-        btn_control_layout.addWidget(self.btn_stop_compose)
-        btn_control_layout.addStretch()
-        
-        # 进度显示区域
-        progress_group = QGroupBox("合成进度")
-        compose_layout.addWidget(progress_group)
-        
-        progress_layout = QVBoxLayout(progress_group)
-        
-        # 进度条
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        progress_layout.addWidget(self.progress_bar)
-        
-        # 状态文本
-        self.label_progress = QLabel("等待合成任务...")
-        progress_layout.addWidget(self.label_progress)
-        
-        # 设置默认禁用停止按钮
-        self.btn_stop_compose.setEnabled(False)
-
-        # 添加其他选项卡
-        self.tabs.addTab(QWidget(), "字幕院线")
-        self.tabs.addTab(QWidget(), "导出院线")
-        self.tabs.addTab(QWidget(), "识别配音")
-        self.tabs.addTab(QWidget(), "视频分割")
     
     def _init_menubar(self):
         """初始化菜单栏"""
@@ -710,18 +789,82 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             QMessageBox.information(self, "添加素材", f"已添加素材文件夹: {folder_name}")
     
     @pyqtSlot()
+    def on_batch_import(self):
+        """批量导入素材文件夹"""
+        # 获取上次导入的文件夹路径作为默认路径
+        last_import_folder = self.user_settings.get_setting("import_folder", "")
+        
+        # 选择根目录，如果有上次的路径则使用它作为初始目录
+        root_dir = QFileDialog.getExistingDirectory(
+            self, 
+            "选择素材根目录", 
+            last_import_folder
+        )
+        
+        if not root_dir:
+            return
+        
+        # 保存导入的文件夹路径到用户设置
+        self.user_settings.set_setting("import_folder", root_dir)
+        
+        # 清空当前列表
+        self.video_table.setRowCount(0)
+        
+        # 更新界面显示的父文件夹名称（只显示文件夹名）
+        folder_name = os.path.basename(root_dir)
+        self.parent_folder_title.setText(folder_name)
+        
+        # 使用_import_material_folder方法导入文件夹
+        self._import_material_folder(root_dir)
+        
+        # 显示导入结果
+        imported_rows = self.video_table.rowCount()
+        if imported_rows > 0:
+            QMessageBox.information(
+                self, 
+                "批量导入完成", 
+                f"成功导入 {imported_rows} 个素材文件夹"
+            )
+        else:
+            QMessageBox.warning(
+                self, 
+                "批量导入", 
+                f"未找到符合条件的素材文件夹。请确保子文件夹中包含'视频'或'配音'文件夹，且其中有媒体文件"
+            )
+    
+    @pyqtSlot()
     def on_refresh_material(self):
-        """刷新素材"""
-        # 刷新表格中的素材信息
-        # 实际应用中，这里应该重新扫描素材文件夹，更新视频和配音数量
-        QMessageBox.information(self, "刷新素材", "素材列表已刷新")
+        """刷新素材列表"""
+        # 获取当前选中的文件夹路径
+        last_import_folder = self.user_settings.get_setting("import_folder", "")
+        
+        if not last_import_folder or not os.path.exists(last_import_folder):
+            QMessageBox.warning(self, "刷新素材", "请先选择有效的素材根目录")
+            return
+            
+        # 清空表格
+        self.video_table.setRowCount(0)
+        
+        # 刷新导入
+        self._import_material_folder(last_import_folder)
+        
+        # 显示刷新结果
+        imported_rows = self.video_table.rowCount()
+        QMessageBox.information(
+            self, 
+            "刷新素材", 
+            f"素材列表已刷新，当前有 {imported_rows} 个素材文件夹"
+        )
     
     @pyqtSlot()
     def on_clear_material(self):
-        """清空素材"""
+        """清空素材列表"""
         # 清空表格
         self.video_table.setRowCount(0)
-        QMessageBox.information(self, "清空素材", "已清空素材列表")
+        # 重置父文件夹名称标题
+        self.parent_folder_title.setText("未选择文件夹")
+        
+        logger.info("素材列表已清空")
     
     @pyqtSlot()
     def on_browse_save_dir(self):
@@ -1790,48 +1933,6 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             error_dialog.setMinimumWidth(600)
             error_dialog.exec_()
     
-    @pyqtSlot()
-    def on_batch_import(self):
-        """批量导入素材文件夹"""
-        # 获取上次导入的文件夹路径作为默认路径
-        last_import_folder = self.user_settings.get_setting("import_folder", "")
-        
-        # 选择根目录，如果有上次的路径则使用它作为初始目录
-        root_dir = QFileDialog.getExistingDirectory(
-            self, 
-            "选择素材根目录", 
-            last_import_folder
-        )
-        
-        if not root_dir:
-            return
-        
-        # 保存导入的文件夹路径到用户设置
-        self.user_settings.set_setting("import_folder", root_dir)
-        
-        # 清空当前列表
-        self.video_table.setRowCount(0)
-        
-        # 使用_import_material_folder方法导入文件夹
-        self._import_material_folder(root_dir)
-        
-        # 显示导入结果
-        # 这里不需要弹窗，因为_import_material_folder方法会记录日志
-        # 但是为了保持与原来的行为一致，我们仍然显示弹窗
-        imported_rows = self.video_table.rowCount()
-        if imported_rows > 0:
-            QMessageBox.information(
-                self, 
-                "批量导入完成", 
-                f"成功导入 {imported_rows} 个素材文件夹"
-            )
-        else:
-            QMessageBox.warning(
-                self, 
-                "批量导入", 
-                f"未找到符合条件的素材文件夹。请确保子文件夹中包含'视频'或'配音'文件夹，且其中有媒体文件"
-            )
-    
     def config_ffmpeg_path(self):
         """配置FFmpeg路径"""
         from PyQt5.QtWidgets import QFileDialog, QMessageBox
@@ -2750,6 +2851,9 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         last_import_folder = self.user_settings.get_setting("import_folder", "")
         if last_import_folder and os.path.exists(last_import_folder):
             logger.info(f"自动导入上次的素材文件夹: {last_import_folder}")
+            # 更新父文件夹标题显示
+            folder_name = os.path.basename(last_import_folder)
+            self.parent_folder_title.setText(folder_name)
             # 清空当前列表
             self.video_table.setRowCount(0)
             # 使用延迟导入，避免阻塞UI
@@ -2760,7 +2864,13 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
     def _import_material_folder(self, root_dir):
         """导入指定的素材文件夹"""
         if not root_dir or not os.path.exists(root_dir):
+            # 如果目录不存在，更新界面显示
+            self.parent_folder_title.setText("路径不存在")
             return
+        
+        # 更新界面显示的父文件夹名称（只显示文件夹名）
+        folder_name = os.path.basename(root_dir)
+        self.parent_folder_title.setText(folder_name)
             
         from src.utils.file_utils import resolve_shortcut
         from src.utils.logger import get_logger
