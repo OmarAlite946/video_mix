@@ -1561,7 +1561,10 @@ class VideoProcessor:
             "-pix_fmt", "yuv420p",   # 使用标准像素格式
             "-profile:v", "high",    # 使用高质量配置文件
             "-level", "4.1",         # 兼容性级别
-            "-movflags", "+faststart" # 优化网络流式传输
+            "-movflags", "+faststart", # 优化网络流式传输
+            "-g", "30",              # 设定关键帧间隔，提高转场质量
+            "-keyint_min", "15",     # 最小关键帧间隔，确保转场区域有足够关键帧
+            "-sc_threshold", "40"    # 场景切换阈值，提高转场处理效果
         ]
         
         # GPU加速相关参数
@@ -1575,10 +1578,12 @@ class VideoProcessor:
                     "-c:v", codec,
                     "-preset", "p4",  # 兼容性好的预设
                     "-b:v", f"{self.settings['bitrate']}k",
-                    "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k", # 最大比特率
-                    "-bufsize", f"{self.settings['bitrate'] * 2}k",        # 缓冲区大小
+                    "-maxrate", f"{int(self.settings['bitrate'] * 2.0)}k", # 增大最大比特率，提高转场质量
+                    "-bufsize", f"{self.settings['bitrate'] * 3}k",        # 增大缓冲区大小，优化转场处理
                     "-spatial-aq", "1",  # 保留基础的自适应量化
-                    "-temporal-aq", "1"  # 保留基础的时间自适应量化
+                    "-temporal-aq", "1", # 保留基础的时间自适应量化
+                    "-rc-lookahead", "32", # 增加前瞻帧数，提高转场区域的处理质量
+                    "-b_ref_mode", "middle" # 改进B帧参考模式
                 ]
             else:
                 logger.info("使用NVENC编码 - 高性能模式参数")
@@ -1588,22 +1593,27 @@ class VideoProcessor:
                     "-preset", "p2",
                     "-tune", "hq",
                     "-b:v", f"{self.settings.get('bitrate', 5000)}k",
-                    "-maxrate", f"{int(self.settings.get('bitrate', 5000) * 1.5)}k",
-                    "-bufsize", f"{self.settings.get('bitrate', 5000) * 2}k",
+                    "-maxrate", f"{int(self.settings.get('bitrate', 5000) * 2.0)}k", # 增大最大比特率
+                    "-bufsize", f"{self.settings.get('bitrate', 5000) * 3}k", # 增大缓冲区
                     "-rc", "vbr",  # 使用vbr替代vbr_hq
                     "-multipass", "2",  # 添加多通道编码参数
                     "-spatial-aq", "1",
                     "-temporal-aq", "1",
                     "-cq", "19",
+                    "-rc-lookahead", "32", # 增加前瞻帧数
+                    "-b_ref_mode", "middle" # 改进B帧参考模式
                 ]
         # QSV特殊参数
         elif codec == "h264_qsv":
             gpu_params = [
                 "-c:v", codec,
                 "-preset", "medium",
-                "-global_quality", "23",
+                "-global_quality", "21", # 降低数值，提高质量
                 "-b:v", f"{self.settings['bitrate']}k",
-                "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k"
+                "-maxrate", f"{int(self.settings['bitrate'] * 2.0)}k", # 提高最大比特率
+                "-look_ahead", "1", # 开启前瞻，提高转场质量
+                "-adaptive_i", "1", # 自适应I帧，有助于场景切换
+                "-adaptive_b", "1"  # 自适应B帧，提高压缩效率
             ]
         # AMF特殊参数
         elif codec == "h264_amf":
@@ -1612,17 +1622,23 @@ class VideoProcessor:
                 "-quality", "quality",
                 "-usage", "transcoding",
                 "-b:v", f"{self.settings['bitrate']}k",
-                "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k"
+                "-maxrate", f"{int(self.settings['bitrate'] * 2.0)}k", # 提高最大比特率
+                "-header_insertion", "1", # 优化转场处的包头
+                "-bf", "4", # 增加B帧数量，提高压缩率和转场处理
+                "-preanalysis", "1" # 预分析模式，提高转场质量
             ]
         else:
             # 其他编码器使用基本参数 (如libx264)
             gpu_params = [
                 "-c:v", codec,
                 "-preset", "medium",  # libx264的预设
-                "-crf", "23",         # 质量参数
+                "-crf", "22",         # 降低crf值，提高质量以减少转场处的方块
                 "-b:v", f"{self.settings['bitrate']}k",
-                "-maxrate", f"{int(self.settings['bitrate'] * 1.5)}k",
-                "-bufsize", f"{self.settings['bitrate'] * 2}k"
+                "-maxrate", f"{int(self.settings['bitrate'] * 2.0)}k",
+                "-bufsize", f"{self.settings['bitrate'] * 3}k",
+                "-b_strategy", "1",   # B帧决策策略
+                "-bf", "3",           # 最大B帧数量
+                "-refs", "4"          # 参考帧数，提高质量
             ]
         
         # 通用参数
@@ -2049,16 +2065,93 @@ class VideoProcessor:
             # 使用drawtext过滤器添加水印
             drawtext_filter = f"drawtext=text='{watermark_text}':fontsize={font_size}:fontcolor=0x{font_color}:box=0:{position_expr}"
             
+            # 检查是否使用快速模式和兼容模式
+            is_fast_mode = self.settings.get("video_mode", "") in ["fast_mode", "ultra_fast_mode"]
+            is_ultra_fast = self.settings.get("video_mode", "") == "ultra_fast_mode"
+            compatibility_mode = self.settings.get("compatibility_mode", False)
+            
             # 完整的FFmpeg命令
             cmd = [
                 ffmpeg_cmd,
                 "-i", input_path,
-                "-vf", drawtext_filter,
-                "-c:v", self.settings.get("encoder", "libx264"),
-                "-c:a", "copy",  # 复制音频，不重新编码
+                "-vf", drawtext_filter
+            ]
+            
+            # 添加优化的编码参数，减少转场处的乱码和方块
+            cmd.extend([
+                "-g", "30",              # 设定关键帧间隔，提高转场质量
+                "-keyint_min", "15",     # 最小关键帧间隔，确保转场区域有足够关键帧
+                "-sc_threshold", "40"    # 场景切换阈值，提高转场处理效果
+            ])
+            
+            # 根据模式选择不同的编码方式
+            encoder = self.settings.get("encoder", "libx264")
+            
+            # 对于NVENC编码器使用特殊参数
+            if "nvenc" in encoder:
+                # 使用与FFmpeg编码相同的优化参数
+                cmd.extend([
+                    "-c:v", encoder,
+                    "-preset", "p2",
+                    "-tune", "hq",
+                    "-b:v", f"{self.settings.get('bitrate', 5000)}k",
+                    "-maxrate", f"{int(self.settings.get('bitrate', 5000) * 2.0)}k", # 增大最大比特率
+                    "-bufsize", f"{self.settings.get('bitrate', 5000) * 3}k", # 增大缓冲区
+                    "-spatial-aq", "1",
+                    "-temporal-aq", "1",
+                    "-rc-lookahead", "32" # 增加前瞻帧数
+                ])
+            elif "qsv" in encoder:
+                # 对于Intel QSV编码器
+                cmd.extend([
+                    "-c:v", encoder,
+                    "-preset", "medium",
+                    "-global_quality", "21", # 降低数值，提高质量
+                    "-b:v", f"{self.settings.get('bitrate', 5000)}k",
+                    "-maxrate", f"{int(self.settings.get('bitrate', 5000) * 2.0)}k", # 提高最大比特率
+                    "-look_ahead", "1", # 开启前瞻，提高转场质量
+                    "-adaptive_i", "1", # 自适应I帧，有助于场景切换
+                    "-adaptive_b", "1"  # 自适应B帧，提高压缩效率
+                ])
+            elif "amf" in encoder:
+                # 对于AMD AMF编码器
+                cmd.extend([
+                    "-c:v", encoder,
+                    "-quality", "quality",
+                    "-usage", "transcoding",
+                    "-b:v", f"{self.settings.get('bitrate', 5000)}k",
+                    "-maxrate", f"{int(self.settings.get('bitrate', 5000) * 2.0)}k", # 提高最大比特率
+                    "-header_insertion", "1", # 优化转场处的包头
+                    "-bf", "4" # 增加B帧数量，提高压缩率和转场处理
+                ])
+            else:
+                # 对于CPU编码器
+                cmd.extend([
+                    "-c:v", encoder,
+                    "-preset", "medium",
+                    "-crf", "22",         # 降低crf值，提高质量以减少转场处的方块
+                    "-b:v", f"{self.settings.get('bitrate', 5000)}k",
+                    "-maxrate", f"{int(self.settings.get('bitrate', 5000) * 2.0)}k",
+                    "-bufsize", f"{self.settings.get('bitrate', 5000) * 3}k",
+                    "-b_strategy", "1",   # B帧决策策略
+                    "-bf", "3",           # 最大B帧数量
+                    "-refs", "4"          # 参考帧数，提高质量
+                ])
+            
+            # 设置通用格式参数
+            cmd.extend([
+                "-pix_fmt", "yuv420p",          # 标准像素格式
+                "-profile:v", "high",           # 高质量配置文件
+                "-level", "4.1",                # 兼容性级别
+                "-movflags", "+faststart",      # 优化网络流式传输
+                "-c:a", "copy"                  # 复制音频，不重新编码
+            ])
+            
+            # 添加输出路径和覆盖参数
+            cmd.extend([
                 "-y",  # 覆盖已存在的文件
                 output_path
-            ]
+            ])
             
             # 处理Windows中文路径
             if os.name == 'nt':
