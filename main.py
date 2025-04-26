@@ -173,6 +173,7 @@ def main():
     parser.add_argument("--config-ffmpeg", action="store_true", help="配置FFmpeg路径后退出")
     parser.add_argument("--gpu-info", action="store_true", help="显示详细GPU信息后退出")
     parser.add_argument("--reset-gpu-config", action="store_true", help="重置GPU配置后退出")
+    parser.add_argument("--batch-mode", action="store_true", help="启动多模板批处理模式")
     args = parser.parse_args()
     
     # 如果指定了配置FFmpeg，则运行配置工具后退出
@@ -187,10 +188,11 @@ def main():
     
     try:
         from PyQt5.QtWidgets import QApplication
-        from ui.main_window import MainWindow
-        from utils.logger import setup_logger
-        from hardware.system_analyzer import SystemAnalyzer
-        from hardware.gpu_config import GPUConfig
+        from src.ui.main_window import MainWindow
+        from src.ui.batch_window import BatchWindow
+        from src.utils.logger import setup_logger
+        from src.hardware.system_analyzer import SystemAnalyzer
+        from src.hardware.gpu_config import GPUConfig
     except ImportError as e:
         print(f"导入错误: {e}")
         print("请确保已安装所有依赖: pip install -r requirements.txt")
@@ -248,24 +250,20 @@ def main():
         print(f"  硬件: {gpu_name} ({gpu_vendor})")
         print(f"  编码器: {encoder}")
     else:
-        # 尝试自动配置GPU
-        if gpu_info.get('available', False):
-            if gpu_config.detect_and_set_optimal_config():
-                gpu_name, gpu_vendor = gpu_config.get_gpu_info()
-                encoder = gpu_config.get_encoder()
-                print(f"\n已自动启用GPU硬件加速:")
-                print(f"  硬件: {gpu_name} ({gpu_vendor})")
-                print(f"  编码器: {encoder}")
-            else:
-                print("\n自动配置GPU硬件加速失败，将使用CPU编码")
-        else:
-            print("\n未检测到可用的GPU，将使用CPU编码")
+        print("\n当前使用CPU编码 (libx264)")
     
-    # 创建并显示主窗口
-    window = MainWindow()
+    # 决定使用哪个窗口
+    if args.batch_mode:
+        # 批处理模式：启动多模板批处理窗口
+        window = BatchWindow()
+        print("\n已启动多模板批处理模式")
+    else:
+        # 标准模式：启动单一模板窗口
+        window = MainWindow()
+        print("\n已启动标准模式")
+    
     window.show()
     
-    # 执行应用
     return app.exec_()
 
 if __name__ == "__main__":
