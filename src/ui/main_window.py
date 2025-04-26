@@ -49,6 +49,7 @@ class MainWindow(QMainWindow):
         # 初始化状态变量
         self.processor = None
         self.processing_thread = None
+        self.last_compose_count = 0  # 记录最后一次合成的视频数量
         
         # 初始化GPU配置
         self.gpu_config = GPUConfig()
@@ -1763,6 +1764,9 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 更新界面状态
         self.btn_start_compose.setEnabled(True)
         self.btn_stop_compose.setEnabled(False)
+        
+        # 保存最后合成的视频数量，供批处理统计使用
+        self.last_compose_count = count
         
         if success and count > 0:
             self.label_progress.setText(f"合成进度: 已完成 {count} 个视频，用时: {total_time}")

@@ -50,6 +50,11 @@ class BatchWindow(QMainWindow):
         self.processing_thread = None  # 处理线程
         self.processing_queue = []  # 处理队列
         
+        # 统计信息
+        self.batch_start_time = None  # 批处理开始时间
+        self.total_processed_count = 0  # 总处理视频数
+        self.total_process_time = 0  # 总处理时间(秒)
+        
         # 初始化模板状态管理
         self.template_state = TemplateState()
         
@@ -212,8 +217,8 @@ class BatchWindow(QMainWindow):
         batch_layout.addWidget(tasks_header)
         
         # 任务表格
-        self.tasks_table = QTableWidget(0, 4)  # 初始为0行，4列
-        self.tasks_table.setHorizontalHeaderLabels(["选择", "模板名称", "状态", "最后处理时间"])
+        self.tasks_table = QTableWidget(0, 6)  # 初始为0行，6列
+        self.tasks_table.setHorizontalHeaderLabels(["选择", "模板名称", "状态", "处理数量", "处理时间", "最后处理时间"])
         self.tasks_table.setSelectionBehavior(QTableWidget.SelectRows)
         
         # 设置列宽
@@ -221,11 +226,15 @@ class BatchWindow(QMainWindow):
         header.setSectionResizeMode(0, QHeaderView.Fixed)  # 选择框固定宽度
         header.setSectionResizeMode(1, QHeaderView.Stretch)  # 名称列自适应
         header.setSectionResizeMode(2, QHeaderView.Fixed)  # 状态列固定宽度
-        header.setSectionResizeMode(3, QHeaderView.Fixed)  # 时间列固定宽度
+        header.setSectionResizeMode(3, QHeaderView.Fixed)  # 处理数量列固定宽度
+        header.setSectionResizeMode(4, QHeaderView.Fixed)  # 处理时间列固定宽度
+        header.setSectionResizeMode(5, QHeaderView.Fixed)  # 最后处理时间列固定宽度
         
         self.tasks_table.setColumnWidth(0, 60)  # 选择框列宽
-        self.tasks_table.setColumnWidth(2, 120)  # 状态列宽
-        self.tasks_table.setColumnWidth(3, 180)  # 时间列宽
+        self.tasks_table.setColumnWidth(2, 80)  # 状态列宽
+        self.tasks_table.setColumnWidth(3, 80)  # 处理数量列宽
+        self.tasks_table.setColumnWidth(4, 100)  # 处理时间列宽
+        self.tasks_table.setColumnWidth(5, 150)  # 时间列宽
         
         batch_layout.addWidget(self.tasks_table)
         
@@ -297,6 +306,19 @@ class BatchWindow(QMainWindow):
         self.batch_progress.setValue(0)
         self.batch_progress.setTextVisible(True)
         progress_layout.addWidget(self.batch_progress)
+        
+        # 添加结果统计区域
+        statistics_layout = QHBoxLayout()
+        statistics_layout.setContentsMargins(0, 10, 0, 0)
+        
+        self.label_total_videos = QLabel("总视频数: 0")
+        self.label_total_time = QLabel("总用时: 0秒")
+        
+        statistics_layout.addWidget(self.label_total_videos)
+        statistics_layout.addStretch(1)
+        statistics_layout.addWidget(self.label_total_time)
+        
+        progress_layout.addLayout(statistics_layout)
         
         batch_layout.addLayout(progress_layout)
         
@@ -516,11 +538,49 @@ class BatchWindow(QMainWindow):
                 status_item.setForeground(QColor("#F44336"))
             self.tasks_table.setItem(row, 2, status_item)
             
+            # 处理数量
+            process_count = tab.get("process_count", 0)
+            self.tasks_table.setItem(row, 3, QTableWidgetItem(str(process_count)))
+            
+            # 处理时间
+            process_time = tab.get("process_time", "-")
+            if isinstance(process_time, (int, float)) and process_time > 0:
+                time_str = self._format_time(process_time)
+            else:
+                time_str = "-"
+            self.tasks_table.setItem(row, 4, QTableWidgetItem(time_str))
+            
             # 最后处理时间
             last_time = tab.get("last_process_time", "-")
             if last_time is None:
                 last_time = "-"
-            self.tasks_table.setItem(row, 3, QTableWidgetItem(last_time))
+            self.tasks_table.setItem(row, 5, QTableWidgetItem(last_time))
+        
+        # 更新统计区域
+        self.label_total_videos.setText(f"总视频数: {self.total_processed_count}")
+        
+        if self.total_process_time > 0:
+            self.label_total_time.setText(f"总用时: {self._format_time(self.total_process_time)}")
+        else:
+            self.label_total_time.setText("总用时: -")
+        
+        # 如果有统计信息，在状态栏显示
+        if self.total_processed_count > 0:
+            self.statusBar.showMessage(f"总计: 处理了 {self.total_processed_count} 个视频，总耗时 {self._format_time(self.total_process_time)}")
+    
+    def _format_time(self, seconds):
+        """将秒数格式化为时分秒"""
+        if seconds < 60:
+            return f"{seconds:.1f}秒"
+        elif seconds < 3600:
+            minutes = int(seconds // 60)
+            seconds = seconds % 60
+            return f"{minutes}分{seconds:.1f}秒"
+        else:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            seconds = seconds % 60
+            return f"{hours}时{minutes}分{seconds:.1f}秒"
     
     def _on_select_all(self):
         """全选/取消全选处理"""
@@ -579,12 +639,21 @@ class BatchWindow(QMainWindow):
             # 在开始前先进行垃圾回收，释放资源
             gc.collect()
             
+            # 重置统计信息
+            self.batch_start_time = time.time()
+            self.total_processed_count = 0
+            self.total_process_time = 0
+            
             # 清空处理队列并重新添加选中的任务
             self.processing_queue = selected_tasks.copy()
             
             # 更新界面状态
             for idx in selected_tasks:
                 self.tabs[idx]["status"] = "等待中"
+                # 重置各个任务的处理统计
+                self.tabs[idx]["process_count"] = 0
+                self.tabs[idx]["process_time"] = 0
+                self.tabs[idx]["start_time"] = None
             
             self._update_tasks_table()
             
@@ -679,6 +748,14 @@ class BatchWindow(QMainWindow):
         self.batch_progress.setValue(0)
         self.statusBar.showMessage("批量处理已停止", 3000)
         
+        # 如果不是处理完成后调用的重置，那么也重置统计信息
+        if not self.processing_queue and len(self.tabs) > 0 and not any(tab["status"] == "完成" for tab in self.tabs):
+            self.total_processed_count = 0
+            self.total_process_time = 0
+            self.batch_start_time = None
+            self.label_total_videos.setText("总视频数: 0")
+            self.label_total_time.setText("总用时: -")
+        
         # 尝试释放所有标签页的资源
         for tab in self.tabs:
             if "window" in tab and tab["window"]:
@@ -718,9 +795,22 @@ class BatchWindow(QMainWindow):
         # 检查队列是否为空
         if not self.processing_queue:
             logger.info("批处理队列已处理完毕")
-            self.statusBar.showMessage("批量处理完成！", 5000)
-            # 弹出提示通知
-            QMessageBox.information(self, "批量处理完成", "所有选中的模板处理已完成！")
+            
+            # 计算总的处理时间
+            if self.batch_start_time:
+                total_batch_time = time.time() - self.batch_start_time
+                self.total_process_time = total_batch_time
+                
+                # 显示完成信息
+                completion_message = f"批量处理完成！总计处理了 {self.total_processed_count} 个视频，总耗时 {self._format_time(total_batch_time)}"
+                self.statusBar.showMessage(completion_message, 0) # 0表示不会自动消失
+                
+                # 弹出提示通知
+                QMessageBox.information(self, "批量处理完成", completion_message)
+            else:
+                self.statusBar.showMessage("批量处理完成！", 5000)
+                QMessageBox.information(self, "批量处理完成", "所有选中的模板处理已完成！")
+                
             self._reset_batch_ui()
             # 发出提示音（如果启用）
             QApplication.beep()
@@ -740,6 +830,9 @@ class BatchWindow(QMainWindow):
         # 获取对应的标签页信息
         tab = self.tabs[next_idx]
         self.current_processing_tab = next_idx
+        
+        # 记录任务开始时间
+        tab["start_time"] = time.time()
         
         logger.info(f"开始处理任务: {tab['name']}，索引: {next_idx}")
         
@@ -818,6 +911,25 @@ class BatchWindow(QMainWindow):
                     if thread_completed or has_completion_flag or processor_cleared:
                         # 处理已完成，更新状态
                         logger.info(f"检测到任务 {tab['name']} 已完成，更新状态")
+                        
+                        # 记录结束时间和处理时间
+                        end_time = time.time()
+                        if tab.get("start_time"):
+                            process_time = end_time - tab["start_time"]
+                            tab["process_time"] = process_time
+                        
+                        # 获取处理数量
+                        process_count = 0
+                        if hasattr(window, "last_compose_count"):
+                            process_count = window.last_compose_count
+                        tab["process_count"] = process_count
+                        
+                        # 更新总计数据
+                        self.total_processed_count += process_count
+                        if tab.get("process_time"):
+                            self.total_process_time += tab["process_time"]
+                        
+                        # 更新状态
                         tab["status"] = "完成"
                         tab["last_process_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                         self._update_tasks_table()
