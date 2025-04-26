@@ -31,6 +31,7 @@ from PyQt5.QtGui import QIcon, QFont, QColor
 
 from src.ui.main_window import MainWindow
 from src.utils.logger import get_logger
+from src.utils.template_state import TemplateState
 
 logger = get_logger()
 
@@ -49,18 +50,130 @@ class BatchWindow(QMainWindow):
         self.processing_thread = None  # 处理线程
         self.processing_queue = []  # 处理队列
         
+        # 初始化模板状态管理
+        self.template_state = TemplateState()
+        
         # 初始化界面
         self._init_ui()
         
         # 初始化状态栏
         self._init_statusbar()
         
-        # 添加初始标签页
-        self._add_new_tab()
-        
         # 设置全局对话框过滤器
         self._setup_dialog_filter()
+        
+        # 加载之前保存的模板
+        self._load_saved_templates()
+        
+        # 如果没有加载到已保存的模板，添加一个初始标签页
+        if len(self.tabs) == 0:
+            self._add_new_tab()
     
+    def _load_saved_templates(self):
+        """加载保存的模板标签页状态"""
+        saved_tabs = self.template_state.load_template_tabs()
+        if not saved_tabs:
+            return
+        
+        for tab_info in saved_tabs:
+            try:
+                self._add_template_from_info(tab_info)
+            except Exception as e:
+                logger.error(f"加载模板 {tab_info.get('name', '未知')} 时出错: {str(e)}")
+        
+        # 更新任务表格
+        self._update_tasks_table()
+        
+    def _add_template_from_info(self, tab_info):
+        """从保存的信息中添加模板标签页"""
+        name = tab_info.get("name", "")
+        file_path = tab_info.get("file_path", "")
+        folder_path = tab_info.get("folder_path", "")
+        
+        if not name:
+            return False
+        
+        # 创建新的MainWindow实例
+        main_window = MainWindow()
+        
+        # 保存原始的on_compose_completed方法
+        original_completed_func = main_window.on_compose_completed
+        
+        # 覆盖原方法，批量模式下不显示提示对话框
+        def batch_on_completed(success=True, count=0, output_dir="", total_time=""):
+            # 调用原方法但不显示MessageBox
+            try:
+                # 临时替换QMessageBox.information方法
+                original_info = QMessageBox.information
+                QMessageBox.information = lambda *args, **kwargs: None
+                
+                # 调用原方法
+                original_completed_func(success, count, output_dir, total_time)
+                
+                # 恢复原方法
+                QMessageBox.information = original_info
+                
+                # 设置完成标志
+                main_window.compose_completed = True
+                logger.info(f"模板 {name} 处理已完成，设置完成标志")
+                
+                # 更新进度时间戳
+                main_window.last_progress_update = time.time()
+                
+                # 记录当前处理器和线程状态
+                has_processor = hasattr(main_window, "processor") and main_window.processor is not None
+                has_thread = hasattr(main_window, "processing_thread") and main_window.processing_thread is not None
+                logger.debug(f"完成回调时状态：处理器={has_processor}，线程={has_thread}")
+                
+                # 如果处理成功，尝试记录输出文件信息
+                if success and count > 0:
+                    logger.info(f"成功合成 {count} 个视频，保存到: {output_dir}，用时: {total_time}")
+            except Exception as e:
+                logger.error(f"批处理模式下处理完成回调出错: {str(e)}")
+                error_detail = traceback.format_exc()
+                logger.error(f"详细错误信息: {error_detail}")
+                # 确保即使出错，也设置完成标志
+                main_window.compose_completed = True
+                main_window.last_progress_update = time.time()
+        
+        # 覆盖方法
+        main_window.on_compose_completed = batch_on_completed
+        
+        # 如果有配置文件路径，尝试加载
+        if file_path and os.path.exists(file_path):
+            try:
+                main_window.load_config(file_path)
+                logger.info(f"已加载模板配置文件: {file_path}")
+            except Exception as e:
+                logger.error(f"加载模板配置文件失败: {str(e)}")
+        
+        # 如果有文件夹路径，尝试设置
+        if folder_path and os.path.exists(folder_path):
+            try:
+                main_window.input_folder_path.setText(folder_path)
+                main_window.on_select_folder()
+                logger.info(f"已设置模板输入文件夹: {folder_path}")
+            except Exception as e:
+                logger.error(f"设置模板输入文件夹失败: {str(e)}")
+        
+        # 添加标签页
+        tab_index = self.tab_widget.addTab(main_window, name)
+        
+        # 记录标签页信息
+        tab_info = {
+            "name": name,
+            "window": main_window,
+            "status": "准备就绪",
+            "last_process_time": None,
+            "file_path": file_path,
+            "folder_path": folder_path
+        }
+        
+        self.tabs.append(tab_info)
+        
+        logger.info(f"已添加模板标签页: {name}")
+        return True
+        
     def _init_ui(self):
         """初始化UI界面"""
         # 创建中央部件
@@ -284,48 +397,57 @@ class BatchWindow(QMainWindow):
                 main_window.compose_completed = True
                 main_window.compose_error = True
                 main_window.last_progress_update = time.time()
+                
                 logger.error(f"模板 {tab_name} 处理出错: {error_msg}")
                 if detail:
-                    logger.error(f"错误详情: {detail}")
+                    logger.error(f"详细错误信息: {detail}")
             except Exception as e:
                 logger.error(f"批处理模式下错误回调出错: {str(e)}")
-                error_detail = traceback.format_exc()
-                logger.error(f"详细错误信息: {error_detail}")
                 # 确保即使出错，也设置完成标志
                 main_window.compose_completed = True
                 main_window.compose_error = True
                 main_window.last_progress_update = time.time()
         
-        # 覆盖错误方法
+        # 覆盖方法
         main_window.on_compose_error = batch_on_error
         
-        # 添加初始标志
-        main_window.compose_completed = False
-        main_window.compose_error = False
-        main_window.last_progress_update = time.time()  # 添加进度更新时间戳
+        # 自动为新的标签页创建编号
+        tab_name = f"模板 {len(self.tabs) + 1}"
         
-        # 创建标签页并将MainWindow添加到其中
-        tab_index = self.tab_widget.count()
-        tab_name = f"模板 {tab_index + 1}"
+        # 添加标签页
+        tab_index = self.tab_widget.addTab(main_window, tab_name)
+        self.tab_widget.setCurrentIndex(tab_index)
         
-        # 将窗口添加到标签页
-        self.tab_widget.addTab(main_window, tab_name)
-        
-        # 添加到标签列表
-        self.tabs.append({
-            "window": main_window,
+        # 记录标签页信息
+        tab_info = {
             "name": tab_name,
-            "status": "就绪",
-            "last_processed": "-"
-        })
+            "window": main_window,
+            "status": "准备就绪",
+            "last_process_time": None,
+            "file_path": "",
+            "folder_path": ""
+        }
+        
+        self.tabs.append(tab_info)
         
         # 更新任务表格
         self._update_tasks_table()
         
-        # 切换到新标签页
-        self.tab_widget.setCurrentIndex(tab_index)
+        # 如果是第一个标签页，默认选中
+        if len(self.tabs) == 1:
+            # 查找表格中的复选框
+            checkbox_container = self.tasks_table.cellWidget(0, 0)
+            if checkbox_container:
+                checkbox = checkbox_container.findChild(QCheckBox)
+                if checkbox:
+                    checkbox.setChecked(True)
         
-        logger.info(f"添加了新标签页: {tab_name}")
+        logger.info(f"已添加新模板标签页: {tab_name}")
+        
+        # 自动保存当前模板状态
+        self._save_template_state()
+        
+        return tab_index
     
     def _on_tab_close(self, index):
         """处理标签页关闭事件"""
@@ -358,6 +480,9 @@ class BatchWindow(QMainWindow):
             
             # 更新任务表格
             self._update_tasks_table()
+            
+            # 保存当前模板状态
+            self._save_template_state()
             
             logger.info(f"关闭了标签页: {tab_name}")
     
@@ -392,7 +517,10 @@ class BatchWindow(QMainWindow):
             self.tasks_table.setItem(row, 2, status_item)
             
             # 最后处理时间
-            self.tasks_table.setItem(row, 3, QTableWidgetItem(tab["last_processed"]))
+            last_time = tab.get("last_process_time", "-")
+            if last_time is None:
+                last_time = "-"
+            self.tasks_table.setItem(row, 3, QTableWidgetItem(last_time))
     
     def _on_select_all(self):
         """全选/取消全选处理"""
@@ -691,7 +819,7 @@ class BatchWindow(QMainWindow):
                         # 处理已完成，更新状态
                         logger.info(f"检测到任务 {tab['name']} 已完成，更新状态")
                         tab["status"] = "完成"
-                        tab["last_processed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        tab["last_process_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                         self._update_tasks_table()
                         self.current_processing_tab = None
                         
@@ -849,6 +977,15 @@ class BatchWindow(QMainWindow):
         try:
             if 0 <= tab_idx < len(self.tabs):
                 self.tabs[tab_idx]["status"] = status
+                
+                # 如果是完成状态，更新最后处理时间
+                if status in ["完成", "失败"]:
+                    import datetime
+                    self.tabs[tab_idx]["last_process_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # 处理完成后自动保存模板状态
+                    self._save_template_state()
+                
                 self._update_tasks_table()
                 logger.info(f"任务 '{self.tabs[tab_idx]['name']}' 状态更新为: {status}")
             else:
@@ -926,6 +1063,12 @@ class BatchWindow(QMainWindow):
             # 停止所有处理
             self._on_stop_batch()
         
+        try:
+            # 保存当前模板状态
+            self._save_template_state()
+        except Exception as e:
+            logger.error(f"保存模板状态时出错: {str(e)}")
+        
         # 恢复原始对话框方法
         if hasattr(self, '_original_info'):
             QMessageBox.information = self._original_info
@@ -956,11 +1099,36 @@ class BatchWindow(QMainWindow):
                 except Exception as e:
                     logger.error(f"关闭标签页 {tab['name']} 时出错: {str(e)}")
         
-        # 清空引用
-        self.tabs.clear()
-        
         # 执行垃圾回收
         gc.collect()
         
         # 接受关闭事件
-        event.accept() 
+        event.accept()
+    
+    def _save_template_state(self):
+        """保存当前模板状态"""
+        try:
+            # 收集各标签页的文件路径和文件夹路径信息
+            for tab in self.tabs:
+                if "window" in tab and tab["window"]:
+                    window = tab["window"]
+                    
+                    # 获取当前配置文件路径
+                    config_file = ""
+                    if hasattr(window, "config_file") and window.config_file:
+                        config_file = window.config_file
+                    
+                    # 获取当前处理文件夹路径
+                    folder_path = ""
+                    if hasattr(window, "input_folder_path"):
+                        folder_path = window.input_folder_path.text().strip()
+                    
+                    # 更新标签页信息
+                    tab["file_path"] = config_file
+                    tab["folder_path"] = folder_path
+            
+            # 保存到配置文件
+            self.template_state.save_template_tabs(self.tabs)
+            logger.info("已保存当前模板状态")
+        except Exception as e:
+            logger.error(f"保存模板状态时出错: {str(e)}") 
