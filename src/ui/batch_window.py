@@ -11,6 +11,8 @@ import time
 import json
 import logging
 import threading
+import gc
+import traceback
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -21,7 +23,10 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QMenu, QAction, QToolButton, QFrame, QSplitter
 )
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QSize, QMetaObject, Q_ARG
+from PyQt5.QtCore import (
+    Qt, pyqtSignal, pyqtSlot, QSize, QMetaObject, Q_ARG,
+    QTimer
+)
 from PyQt5.QtGui import QIcon, QFont, QColor
 
 from src.ui.main_window import MainWindow
@@ -52,6 +57,9 @@ class BatchWindow(QMainWindow):
         
         # 添加初始标签页
         self._add_new_tab()
+        
+        # 设置全局对话框过滤器
+        self._setup_dialog_filter()
     
     def _init_ui(self):
         """初始化UI界面"""
@@ -199,6 +207,103 @@ class BatchWindow(QMainWindow):
         # 创建新的MainWindow实例
         main_window = MainWindow()
         
+        # 保存原始的on_compose_completed方法
+        original_completed_func = main_window.on_compose_completed
+        
+        # 覆盖原方法，批量模式下不显示提示对话框
+        def batch_on_completed(success=True, count=0, output_dir="", total_time=""):
+            # 调用原方法但不显示MessageBox
+            try:
+                # 临时替换QMessageBox.information方法
+                original_info = QMessageBox.information
+                QMessageBox.information = lambda *args, **kwargs: None
+                
+                # 调用原方法
+                original_completed_func(success, count, output_dir, total_time)
+                
+                # 恢复原方法
+                QMessageBox.information = original_info
+                
+                # 设置完成标志
+                main_window.compose_completed = True
+                logger.info(f"模板 {tab_name} 处理已完成，设置完成标志")
+                
+                # 更新进度时间戳
+                main_window.last_progress_update = time.time()
+                
+                # 记录当前处理器和线程状态
+                has_processor = hasattr(main_window, "processor") and main_window.processor is not None
+                has_thread = hasattr(main_window, "processing_thread") and main_window.processing_thread is not None
+                logger.debug(f"完成回调时状态：处理器={has_processor}，线程={has_thread}")
+                
+                # 如果处理成功，尝试记录输出文件信息
+                if success and count > 0:
+                    logger.info(f"成功合成 {count} 个视频，保存到: {output_dir}，用时: {total_time}")
+            except Exception as e:
+                logger.error(f"批处理模式下处理完成回调出错: {str(e)}")
+                error_detail = traceback.format_exc()
+                logger.error(f"详细错误信息: {error_detail}")
+                # 确保即使出错，也设置完成标志
+                main_window.compose_completed = True
+                main_window.last_progress_update = time.time()
+        
+        # 覆盖方法
+        main_window.on_compose_completed = batch_on_completed
+        
+        # 覆盖进度更新回调，以确保进度时间戳正确更新
+        original_update_progress = None
+        if hasattr(main_window, "_do_update_progress"):
+            original_update_progress = main_window._do_update_progress
+            
+            def batch_update_progress(message, percent):
+                # 更新进度时间戳
+                main_window.last_progress_update = time.time()
+                # 调用原方法
+                if original_update_progress:
+                    original_update_progress(message, percent)
+                    
+            # 覆盖方法    
+            main_window._do_update_progress = batch_update_progress
+        
+        # 同样处理错误回调，避免出错时弹框
+        original_error_func = main_window.on_compose_error
+        
+        def batch_on_error(error_msg, detail=""):
+            try:
+                # 临时替换QMessageBox.critical方法
+                original_critical = QMessageBox.critical
+                QMessageBox.critical = lambda *args, **kwargs: None
+                
+                # 调用原方法
+                original_error_func(error_msg, detail)
+                
+                # 恢复原方法
+                QMessageBox.critical = original_critical
+                
+                # 设置错误标志，这也表示处理已完成，但有错误
+                main_window.compose_completed = True
+                main_window.compose_error = True
+                main_window.last_progress_update = time.time()
+                logger.error(f"模板 {tab_name} 处理出错: {error_msg}")
+                if detail:
+                    logger.error(f"错误详情: {detail}")
+            except Exception as e:
+                logger.error(f"批处理模式下错误回调出错: {str(e)}")
+                error_detail = traceback.format_exc()
+                logger.error(f"详细错误信息: {error_detail}")
+                # 确保即使出错，也设置完成标志
+                main_window.compose_completed = True
+                main_window.compose_error = True
+                main_window.last_progress_update = time.time()
+        
+        # 覆盖错误方法
+        main_window.on_compose_error = batch_on_error
+        
+        # 添加初始标志
+        main_window.compose_completed = False
+        main_window.compose_error = False
+        main_window.last_progress_update = time.time()  # 添加进度更新时间戳
+        
         # 创建标签页并将MainWindow添加到其中
         tab_index = self.tab_widget.count()
         tab_name = f"模板 {tab_index + 1}"
@@ -340,7 +445,13 @@ class BatchWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
-            # 清空处理队列
+            # 先停止可能正在运行的任何处理
+            self._reset_batch_ui()
+            
+            # 在开始前先进行垃圾回收，释放资源
+            gc.collect()
+            
+            # 清空处理队列并重新添加选中的任务
             self.processing_queue = selected_tasks.copy()
             
             # 更新界面状态
@@ -357,8 +468,14 @@ class BatchWindow(QMainWindow):
             # 更新队列状态
             self.label_queue.setText(f"队列: 0/{len(selected_tasks)}")
             
-            # 开始处理
-            self._process_next_task()
+            # 批处理模式下启用对话框过滤
+            logger.info("启用批处理模式对话框过滤")
+            
+            # 确保UI完全更新
+            QApplication.processEvents()
+            
+            # 使用定时器延迟开始处理，给UI一些响应时间
+            QTimer.singleShot(500, self._process_next_task)
     
     def _on_stop_batch(self):
         """停止批量处理"""
@@ -375,6 +492,8 @@ class BatchWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
+            logger.info("用户请求停止批量处理")
+            
             # 停止当前处理
             if self.current_processing_tab is not None:
                 tab_idx = self.current_processing_tab
@@ -382,7 +501,17 @@ class BatchWindow(QMainWindow):
                     # 获取MainWindow实例并调用停止方法
                     main_window = self.tabs[tab_idx]["window"]
                     if main_window:
-                        main_window.on_stop_compose()
+                        try:
+                            logger.info(f"正在停止当前处理任务: {self.tabs[tab_idx]['name']}")
+                            main_window.on_stop_compose()
+                            
+                            # 强制清理资源
+                            if hasattr(main_window, "processor") and main_window.processor:
+                                if hasattr(main_window.processor, "clean_temp_files"):
+                                    main_window.processor.clean_temp_files()
+                                main_window.processor = None
+                        except Exception as e:
+                            logger.error(f"停止处理时出错: {str(e)}")
             
             # 清空队列
             self.processing_queue = []
@@ -393,86 +522,390 @@ class BatchWindow(QMainWindow):
             
             # 恢复界面状态
             self._reset_batch_ui()
+            
+            # 重置所有处理中或等待中的任务状态
+            for i, tab in enumerate(self.tabs):
+                if tab["status"] in ["处理中", "等待中"]:
+                    tab["status"] = "已停止"
+                    
+            # 更新任务表格
+            self._update_tasks_table()
+            
+            # 执行垃圾回收
+            gc.collect()
     
     def _reset_batch_ui(self):
         """重置批处理界面状态"""
+        logger.info("重置批处理界面状态")
+        
+        # 清空处理队列
+        self.processing_queue = []
+        
+        # 重置状态变量
         self.is_processing = False
         self.current_processing_tab = None
+        
+        # 更新UI元素
         self.btn_start_batch.setEnabled(True)
         self.btn_stop_batch.setEnabled(False)
         self.batch_progress.setValue(0)
         self.statusBar.showMessage("批量处理已停止", 3000)
+        
+        # 尝试释放所有标签页的资源
+        for tab in self.tabs:
+            if "window" in tab and tab["window"]:
+                try:
+                    window = tab["window"]
+                    # 尝试清理处理器资源
+                    if hasattr(window, "processor") and window.processor:
+                        if hasattr(window.processor, "stop_processing"):
+                            try:
+                                window.processor.stop_processing()
+                            except:
+                                pass
+                        window.processor = None
+                    
+                    # 重置处理线程
+                    if hasattr(window, "processing_thread") and window.processing_thread:
+                        window.processing_thread = None
+                except Exception as e:
+                    logger.error(f"重置标签页资源时出错: {str(e)}")
+        
+        # 强制处理所有挂起的事件
+        QApplication.processEvents()
+        
+        # 执行垃圾回收
+        gc.collect()
+        
+        logger.info("批处理模式已重置")
     
     def _process_next_task(self):
         """处理队列中的下一个任务"""
-        if not self.processing_queue or not self.is_processing:
-            # 处理完成或已停止
-            if self.is_processing:
-                # 正常完成所有任务
-                self.label_current_task.setText("当前任务: 全部完成")
-                self.batch_progress.setValue(100)
-                self.statusBar.showMessage("批量处理已完成", 3000)
-                QMessageBox.information(self, "批量处理", "所有模板处理完成！")
-                self._reset_batch_ui()
+        # 首先检查是否还在批处理过程中
+        if not self.is_processing:
+            logger.info("批处理已停止，不再继续处理队列")
+            self.statusBar.showMessage("批处理已停止", 3000)
             return
         
-        # 获取下一个任务
-        tab_idx = self.processing_queue.pop(0)
-        self.current_processing_tab = tab_idx
+        # 检查队列是否为空
+        if not self.processing_queue:
+            logger.info("批处理队列已处理完毕")
+            self.statusBar.showMessage("批量处理完成！", 5000)
+            # 弹出提示通知
+            QMessageBox.information(self, "批量处理完成", "所有选中的模板处理已完成！")
+            self._reset_batch_ui()
+            # 发出提示音（如果启用）
+            QApplication.beep()
+            return
         
-        # 切换到对应标签
-        self.tab_widget.setCurrentIndex(tab_idx)
+        logger.info(f"处理队列中的下一个任务，当前队列长度: {len(self.processing_queue)}")
+        
+        # 获取下一个任务索引
+        next_idx = self.processing_queue[0]
+        self.processing_queue.pop(0)
+        
+        if next_idx < 0 or next_idx >= len(self.tabs):
+            logger.error(f"无效的任务索引: {next_idx}，跳过此任务")
+            QTimer.singleShot(100, self._process_next_task)
+            return
+        
+        # 获取对应的标签页信息
+        tab = self.tabs[next_idx]
+        self.current_processing_tab = next_idx
+        
+        logger.info(f"开始处理任务: {tab['name']}，索引: {next_idx}")
         
         # 更新状态
-        tab_name = self.tabs[tab_idx]["name"]
-        self.tabs[tab_idx]["status"] = "处理中"
-        self.tabs[tab_idx]["last_processed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        tab["status"] = "处理中"
         self._update_tasks_table()
         
-        # 更新当前任务显示
-        self.label_current_task.setText(f"当前任务: {tab_name}")
-        
         # 更新队列状态
-        completed = len(self.tabs) - len(self.processing_queue) - 1
-        total = len(self.tabs)
-        self.label_queue.setText(f"队列: {completed}/{total}")
+        total_selected_tasks = sum(1 for tab in self.tabs if tab["status"] in ["处理中", "等待中", "完成"])
+        completed_tasks = sum(1 for tab in self.tabs if tab["status"] == "完成")
+        self.label_queue.setText(f"队列: {completed_tasks}/{total_selected_tasks}")
         
-        # 更新总进度
-        progress_percent = int(completed * 100 / total)
-        self.batch_progress.setValue(progress_percent)
+        # 更新当前任务标签
+        self.label_current_task.setText(f"当前任务: {tab['name']}")
         
-        # 获取MainWindow实例
-        main_window = self.tabs[tab_idx]["window"]
+        # 获取标签页的主窗口实例
+        window = tab.get("window")
+        if not window:
+            logger.error(f"标签页 {next_idx} 的窗口实例为空，跳过此任务")
+            self.current_processing_tab = None
+            tab["status"] = "失败"
+            self._update_tasks_table()
+            QTimer.singleShot(100, self._process_next_task)
+            return
         
-        # 在单独线程中启动处理
-        def run_process():
-            try:
-                # 模拟点击"开始合成"按钮
-                main_window.on_start_compose()
-                
-                # 等待处理完成
-                while main_window.processing_thread and main_window.processing_thread.is_alive():
-                    time.sleep(0.5)
+        # 更新进度条
+        progress_percentage = (completed_tasks / total_selected_tasks) * 100
+        self.batch_progress.setValue(int(progress_percentage))
+        
+        # 显示当前处理的任务信息
+        self.statusBar.showMessage(f"正在处理: {tab['name']}")
+        
+        # 确保UI更新
+        QApplication.processEvents()
+        
+        try:
+            # 设置一个检查完成状态的定时器函数
+            def check_completion():
+                try:
+                    if not self.is_processing:
+                        logger.info("批处理已停止，不再检查任务完成状态")
+                        return
                     
-                # 记录完成状态
-                self.tabs[tab_idx]["status"] = "完成"
-                self._update_tasks_table()
-                
-                # 处理下一个任务
-                if self.is_processing:
-                    QMetaObject.invokeMethod(self, "_process_next_task", Qt.QueuedConnection)
+                    # 添加更详细的日志，帮助诊断问题
+                    logger.debug(f"检查任务 {tab['name']} 完成状态:")
+                    
+                    # 检查线程状态
+                    thread_exists = hasattr(window, "processing_thread")
+                    thread_running = thread_exists and window.processing_thread is not None
+                    thread_alive = thread_running and (
+                        hasattr(window.processing_thread, "is_alive") and 
+                        window.processing_thread.is_alive()
+                    )
+                    
+                    # 检查完成标志状态
+                    has_completion_attr = hasattr(window, "compose_completed")
+                    completion_flag = has_completion_attr and window.compose_completed
+                    
+                    # 记录详细状态日志
+                    logger.debug(f"  - 线程状态: 存在={thread_exists}, 运行中={thread_running}, 活跃={thread_alive}")
+                    logger.debug(f"  - 完成标志: 存在={has_completion_attr}, 已设置={completion_flag}")
+                    
+                    # 检查是否有文件正在生成
+                    is_generating_files = False
+                    if hasattr(window, "processor") and window.processor:
+                        is_generating_files = True
+                    
+                    # 检查是否完成的条件：1.线程不存在或已结束 2.有专门的完成标志
+                    thread_completed = not thread_running or (thread_running and not thread_alive)
+                    has_completion_flag = completion_flag
+                    
+                    # 添加处理器检查 - 如果处理器已被清空，也视为完成
+                    processor_cleared = not hasattr(window, "processor") or window.processor is None
+                    logger.debug(f"  - 处理器状态: 已清除={processor_cleared}, 正在生成文件={is_generating_files}")
+                    
+                    if thread_completed or has_completion_flag or processor_cleared:
+                        # 处理已完成，更新状态
+                        logger.info(f"检测到任务 {tab['name']} 已完成，更新状态")
+                        tab["status"] = "完成"
+                        tab["last_processed"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        self._update_tasks_table()
+                        self.current_processing_tab = None
+                        
+                        # 更新进度信息
+                        total_selected_tasks = sum(1 for tab in self.tabs if tab["status"] in ["处理中", "等待中", "完成"])
+                        completed_tasks = sum(1 for tab in self.tabs if tab["status"] == "完成")
+                        self.label_queue.setText(f"队列: {completed_tasks}/{total_selected_tasks}")
+                        progress_percentage = (completed_tasks / total_selected_tasks) * 100
+                        self.batch_progress.setValue(int(progress_percentage))
+                        
+                        # 确保资源被清理
+                        try:
+                            if hasattr(window, "processor") and window.processor:
+                                if hasattr(window.processor, "stop_processing"):
+                                    window.processor.stop_processing()
+                                window.processor = None
+                            if hasattr(window, "processing_thread") and window.processing_thread:
+                                window.processing_thread = None
+                        except Exception as e:
+                            logger.error(f"清理资源时出错: {str(e)}")
+                        
+                        # 处理完成后，立即启动下一个任务
+                        logger.info(f"标签页 {next_idx} 处理完成，准备处理下一个任务")
+                        
+                        # 使用短时间延迟调用下一个任务，确保UI有时间更新
+                        QTimer.singleShot(500, self._process_next_task)
+                    else:
+                        # 如果线程仍在运行，再次检查
+                        # 为了避免卡住，我们也检查一下是否线程确实在工作
+                        if hasattr(window, "last_progress_update"):
+                            current_time = time.time()
+                            time_since_update = current_time - window.last_progress_update
+                            logger.debug(f"  - 上次进度更新: {time_since_update:.1f}秒前")
+                            
+                            # 增加超时时间到30秒，视频处理可能需要更长时间
+                            if time_since_update > 30:  # 如果30秒没有进度更新
+                                logger.warning(f"任务 {tab['name']} 似乎已卡住 (>30秒无进度更新)，尝试重启处理流程")
+                                
+                                # 尝试直接调用处理过程来恢复
+                                try:
+                                    # 检查是否有进度标签
+                                    if hasattr(window, "label_progress"):
+                                        progress_text = window.label_progress.text()
+                                        logger.debug(f"  - 当前进度标签: {progress_text}")
+                                    
+                                    # 如果处理器存在，尝试强制更新进度来触发进度检测
+                                    if hasattr(window, "processor") and window.processor:
+                                        if hasattr(window.processor, "report_progress"):
+                                            window.processor.report_progress("批处理模式中重新触发进度更新", 50.0)
+                                            window.last_progress_update = time.time()
+                                            logger.info("已重新触发进度更新")
+                                            QTimer.singleShot(500, check_completion)
+                                            return
+                                        
+                                    # 如果无法恢复处理流程，则放弃当前任务，继续下一个
+                                    logger.warning(f"无法恢复任务 {tab['name']} 的处理流程，放弃当前任务")
+                                    tab["status"] = "失败(超时)"
+                                    self._update_tasks_table()
+                                    self.current_processing_tab = None
+                                    
+                                    # 尝试停止当前任务
+                                    window.on_stop_compose()
+                                    
+                                    # 延迟一下再处理下一个任务
+                                    QTimer.singleShot(1000, self._process_next_task)
+                                    return
+                                except Exception as e:
+                                    logger.error(f"尝试恢复处理流程时出错: {str(e)}")
+                                    error_detail = traceback.format_exc()
+                                    logger.error(f"详细错误信息: {error_detail}")
+                                    
+                                    # 停止当前任务，继续下一个
+                                    tab["status"] = "失败(处理错误)"
+                                    self._update_tasks_table()
+                                    self.current_processing_tab = None
+                                    window.on_stop_compose()
+                                    QTimer.singleShot(1000, self._process_next_task)
+                                    return
+                        
+                        # 更快地检查状态 - 1秒检查一次
+                        QTimer.singleShot(1000, check_completion)
+                except Exception as e:
+                    logger.error(f"检查任务完成状态时出错: {str(e)}")
+                    error_detail = traceback.format_exc()
+                    logger.error(f"详细错误信息: {error_detail}")
+                    
+                    # 出错后也要继续下一个任务
+                    tab["status"] = "失败"
+                    self._update_tasks_table()
+                    self.current_processing_tab = None
+                    QTimer.singleShot(500, self._process_next_task)
+            
+            # 在启动前，确保窗口已经初始化完成
+            if hasattr(window, "last_progress_update"):
+                window.last_progress_update = time.time()
+            else:
+                # 如果没有这个属性，添加一个
+                window.last_progress_update = time.time()
+            
+            # 重置处理状态标志
+            window.compose_completed = False
+            window.compose_error = False
+            logger.info(f"开始处理标签页 {next_idx}: {tab['name']}")
+            
+            # 确保标签页处于可见状态，切换到相应标签
+            self.tab_widget.setCurrentIndex(next_idx)
+            QApplication.processEvents()  # 确保UI更新
+            
+            # 启动合成
+            try:
+                # 尝试触发关键UI事件，确保实际点击按钮而不只是调用后台函数
+                if hasattr(window, "btn_start_compose") and window.btn_start_compose:
+                    window.btn_start_compose.click()
+                    logger.info(f"通过点击按钮启动合成: {tab['name']}")
+                else:
+                    # 如果无法找到按钮，直接调用方法
+                    window.on_start_compose()
+                    logger.info(f"通过调用方法启动合成: {tab['name']}")
             except Exception as e:
-                logger.error(f"处理模板 '{tab_name}' 时发生错误: {str(e)}")
-                self.tabs[tab_idx]["status"] = "失败"
-                self._update_tasks_table()
+                logger.error(f"启动合成过程时出错: {str(e)}")
+                error_detail = traceback.format_exc()
+                logger.error(f"详细错误信息: {error_detail}")
                 
-                # 处理下一个任务
-                if self.is_processing:
-                    QMetaObject.invokeMethod(self, "_process_next_task", Qt.QueuedConnection)
+                # 尝试一次直接方法调用
+                try:
+                    window.on_start_compose()
+                    logger.info("使用备用方法启动合成")
+                except Exception as e2:
+                    logger.error(f"备用启动方法也失败: {str(e2)}")
+                    # 失败后继续下一个任务
+                    tab["status"] = "失败(无法启动)"
+                    self._update_tasks_table()
+                    self.current_processing_tab = None
+                    QTimer.singleShot(500, self._process_next_task)
+                    return
+            
+            # 启动检查完成状态的定时器，稍微延迟一下确保处理已经开始
+            QTimer.singleShot(1000, check_completion)
+            
+        except Exception as e:
+            logger.error(f"处理标签页 {next_idx} 时出错: {str(e)}")
+            # 添加详细的错误信息
+            error_detail = traceback.format_exc()
+            logger.error(f"详细错误信息: {error_detail}")
+            
+            tab["status"] = "失败"
+            self._update_tasks_table()
+            self.current_processing_tab = None
+            
+            # 出错后，继续处理下一个任务
+            QTimer.singleShot(500, self._process_next_task)
+    
+    def _update_task_status(self, tab_idx, status):
+        """更新任务状态（由工作线程调用，保证在UI线程执行）"""
+        try:
+            if 0 <= tab_idx < len(self.tabs):
+                self.tabs[tab_idx]["status"] = status
+                self._update_tasks_table()
+                logger.info(f"任务 '{self.tabs[tab_idx]['name']}' 状态更新为: {status}")
+            else:
+                logger.warning(f"无效的标签索引: {tab_idx}")
+        except Exception as e:
+            logger.error(f"更新任务状态时出错: {str(e)}")
+    
+    def _setup_dialog_filter(self):
+        """设置全局对话框过滤器，用于在批处理模式下抑制对话框"""
+        # 保存原始的QMessageBox方法
+        self._original_info = QMessageBox.information
+        self._original_warning = QMessageBox.warning
+        self._original_critical = QMessageBox.critical
+        self._original_question = QMessageBox.question
         
-        # 启动处理线程
-        self.processing_thread = threading.Thread(target=run_process, daemon=True)
-        self.processing_thread.start()
+        # 定义在批处理模式下使用的替代方法
+        def _filtered_info(parent, title, text, *args, **kwargs):
+            # 如果正在批处理且不是来自BatchWindow的消息，则忽略
+            if self.is_processing and parent is not self:
+                logger.info(f"批处理模式抑制信息对话框: {title} - {text}")
+                # 通常信息对话框返回QMessageBox.Ok
+                return QMessageBox.Ok
+            # 否则使用原始方法
+            return self._original_info(parent, title, text, *args, **kwargs)
+        
+        def _filtered_warning(parent, title, text, *args, **kwargs):
+            # 如果正在批处理且不是来自BatchWindow的消息，则忽略
+            if self.is_processing and parent is not self:
+                logger.warning(f"批处理模式抑制警告对话框: {title} - {text}")
+                # 通常警告对话框返回QMessageBox.Ok
+                return QMessageBox.Ok
+            # 否则使用原始方法
+            return self._original_warning(parent, title, text, *args, **kwargs)
+        
+        def _filtered_critical(parent, title, text, *args, **kwargs):
+            # 如果正在批处理且不是来自BatchWindow的消息，则忽略
+            if self.is_processing and parent is not self:
+                logger.error(f"批处理模式抑制错误对话框: {title} - {text}")
+                # 通常错误对话框返回QMessageBox.Ok
+                return QMessageBox.Ok
+            # 否则使用原始方法
+            return self._original_critical(parent, title, text, *args, **kwargs)
+        
+        def _filtered_question(parent, title, text, *args, **kwargs):
+            # 如果正在批处理且不是来自BatchWindow的消息，则忽略
+            if self.is_processing and parent is not self:
+                logger.info(f"批处理模式抑制问题对话框: {title} - {text}")
+                # 对于问题对话框，通常返回Yes作为肯定回答
+                return QMessageBox.Yes
+            # 否则使用原始方法
+            return self._original_question(parent, title, text, *args, **kwargs)
+        
+        # 替换全局方法
+        QMessageBox.information = _filtered_info
+        QMessageBox.warning = _filtered_warning
+        QMessageBox.critical = _filtered_critical
+        QMessageBox.question = _filtered_question
     
     def closeEvent(self, event):
         """窗口关闭事件"""
@@ -493,10 +926,41 @@ class BatchWindow(QMainWindow):
             # 停止所有处理
             self._on_stop_batch()
         
+        # 恢复原始对话框方法
+        if hasattr(self, '_original_info'):
+            QMessageBox.information = self._original_info
+        if hasattr(self, '_original_warning'):
+            QMessageBox.warning = self._original_warning
+        if hasattr(self, '_original_critical'):
+            QMessageBox.critical = self._original_critical
+        if hasattr(self, '_original_question'):
+            QMessageBox.question = self._original_question
+        
+        logger.info("正在关闭所有标签页")
+        
         # 关闭所有标签页
-        for tab in self.tabs:
+        for i, tab in enumerate(self.tabs):
             if "window" in tab and tab["window"]:
-                tab["window"].close()
+                try:
+                    # 先清理资源
+                    window = tab["window"]
+                    if hasattr(window, "processor") and window.processor:
+                        window.processor = None
+                    if hasattr(window, "processing_thread") and window.processing_thread:
+                        window.processing_thread = None
+                    
+                    # 关闭窗口
+                    window.close()
+                    
+                    logger.info(f"已关闭标签页 {i+1}/{len(self.tabs)}")
+                except Exception as e:
+                    logger.error(f"关闭标签页 {tab['name']} 时出错: {str(e)}")
+        
+        # 清空引用
+        self.tabs.clear()
+        
+        # 执行垃圾回收
+        gc.collect()
         
         # 接受关闭事件
         event.accept() 

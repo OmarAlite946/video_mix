@@ -12,7 +12,7 @@ from pathlib import Path
 from datetime import datetime
 
 # 日志级别
-LOG_LEVEL = logging.INFO
+LOG_LEVEL = logging.DEBUG
 
 # 默认日志目录
 DEFAULT_LOG_DIR = Path.home() / "VideoMixTool" / "logs"
