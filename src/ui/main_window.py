@@ -22,11 +22,11 @@ from PyQt5.QtWidgets import (
     QProgressBar, QComboBox, QTabWidget, QGroupBox, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QCheckBox, QStatusBar, QAction, QMenu, QTextEdit, QDialog, QApplication, QStyle,
-    QSplitter, QSizePolicy
+    QSplitter, QSizePolicy, QFrame
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QMetaObject, Q_ARG, Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QMetaObject, Q_ARG, Qt, QPoint, QRect
 from PyQt5 import QtCore
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QFont, QIcon, QPainter, QColor, QPen, QBrush, QMouseEvent
 
 from src.utils.logger import get_logger
 from src.utils.cache_config import CacheConfig
@@ -489,24 +489,55 @@ class MainWindow(QMainWindow):
         position_layout.addStretch()
         watermark_layout.addLayout(position_layout)
         
-        # 自定义位置微调
-        position_adjust_layout = QHBoxLayout()
+        # 创建水印预览与调整控件
+        preview_adjust_layout = QHBoxLayout()
+        
+        # 左侧：位置预览控件
+        self.watermark_preview = WatermarkPreview()
+        # 添加一个标签
+        preview_label = QLabel("水印位置预览（可拖拽调整）:")
+        preview_label.setAlignment(Qt.AlignCenter)
+        
+        preview_left_layout = QVBoxLayout()
+        preview_left_layout.addWidget(preview_label)
+        preview_left_layout.addWidget(self.watermark_preview, 1, Qt.AlignCenter)
+        preview_left_layout.addStretch()
+        
+        # 右侧：位置微调控件
+        position_adjust_layout = QVBoxLayout()
+        position_adjust_label = QLabel("位置微调:")
+        position_adjust_layout.addWidget(position_adjust_label)
+        
+        # X轴微调
+        x_adjust_layout = QHBoxLayout()
+        x_adjust_layout.addWidget(QLabel("X:"))
         self.spin_pos_x = QSpinBox()
         self.spin_pos_x.setRange(-100, 100)
         self.spin_pos_x.setValue(0)
         self.spin_pos_x.setSuffix(" px")
+        x_adjust_layout.addWidget(self.spin_pos_x)
+        position_adjust_layout.addLayout(x_adjust_layout)
         
+        # Y轴微调
+        y_adjust_layout = QHBoxLayout()
+        y_adjust_layout.addWidget(QLabel("Y:"))
         self.spin_pos_y = QSpinBox()
         self.spin_pos_y.setRange(-100, 100)
         self.spin_pos_y.setValue(0)
         self.spin_pos_y.setSuffix(" px")
+        y_adjust_layout.addWidget(self.spin_pos_y)
+        position_adjust_layout.addLayout(y_adjust_layout)
         
-        position_adjust_layout.addWidget(QLabel("位置微调: X"))
-        position_adjust_layout.addWidget(self.spin_pos_x)
-        position_adjust_layout.addWidget(QLabel("Y"))
-        position_adjust_layout.addWidget(self.spin_pos_y)
+        # 重置按钮
+        self.reset_btn = QPushButton("重置位置")
+        position_adjust_layout.addWidget(self.reset_btn)
         position_adjust_layout.addStretch()
-        watermark_layout.addLayout(position_adjust_layout)
+        
+        # 组合预览和调整控件
+        preview_adjust_layout.addLayout(preview_left_layout)
+        preview_adjust_layout.addLayout(position_adjust_layout)
+        
+        watermark_layout.addLayout(preview_adjust_layout)
         
         # 添加水印设置到主设置布局
         settings_layout.addRow(watermark_group)
@@ -676,6 +707,15 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 水印设置
         self.btn_custom_color.clicked.connect(self.on_choose_custom_color)
         self.combo_watermark_color.currentTextChanged.connect(self.on_watermark_color_changed)
+        self.combo_watermark_position.currentTextChanged.connect(self.on_watermark_position_changed)
+        self.spin_watermark_size.valueChanged.connect(self.on_watermark_size_changed)
+        self.edit_watermark_prefix.textChanged.connect(self.on_watermark_prefix_changed)
+        self.spin_pos_x.valueChanged.connect(self.on_pos_x_changed)
+        self.spin_pos_y.valueChanged.connect(self.on_pos_y_changed)
+        self.reset_btn.clicked.connect(self.on_reset_watermark_position)
+        
+        # 连接水印预览控件的位置变化信号
+        self.watermark_preview.positionChanged.connect(self.on_preview_position_changed)
         
         # 缓存目录
         self.btn_browse_cache_dir.clicked.connect(self.on_browse_cache_dir)
@@ -2826,7 +2866,7 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         watermark_pos_x = self.user_settings.get_setting("watermark_pos_x", 10)
         self.spin_pos_x.setValue(watermark_pos_x)
         
-        watermark_pos_y = self.user_settings.get_setting("watermark_pos_y", 10)
+        watermark_pos_y = self.user_settings.get_setting("watermark_pos_y", 0)
         self.spin_pos_y.setValue(watermark_pos_y)
         
         # 获取音量设置
@@ -2862,6 +2902,12 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
             self.video_table.setRowCount(0)
             # 使用延迟导入，避免阻塞UI
             QtCore.QTimer.singleShot(200, lambda: self._import_material_folder(last_import_folder))
+        
+        # 使用延迟更新水印预览，确保UI已完全加载
+        try:
+            QtCore.QTimer.singleShot(300, self._update_watermark_preview)
+        except Exception as e:
+            logger.error(f"设置水印预览更新定时器时出错: {str(e)}")
         
         logger.info("用户设置加载完成")
     
@@ -3041,3 +3087,292 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         self._save_user_settings()
         # 继续默认的关闭行为
         super().closeEvent(event)
+
+    # 添加水印位置预览相关的方法
+    def on_watermark_position_changed(self, position):
+        """处理水印预设位置变化"""
+        try:
+            # 检查预览控件是否已创建
+            if hasattr(self, "watermark_preview") and self.watermark_preview:
+                # 更新预览控件
+                self.watermark_preview.set_watermark_position(position)
+        except Exception as e:
+            logger.error(f"更新水印位置时出错: {str(e)}")
+        
+        # 保存设置
+        self.user_settings.set_setting("watermark_position", position)
+    
+    def on_watermark_size_changed(self, size):
+        """处理水印字体大小变化"""
+        try:
+            # 检查预览控件是否已创建
+            if hasattr(self, "watermark_preview") and self.watermark_preview:
+                # 更新预览控件
+                self.watermark_preview.set_watermark_size(size)
+        except Exception as e:
+            logger.error(f"更新水印大小时出错: {str(e)}")
+        
+        # 保存设置
+        self.user_settings.set_setting("watermark_size", size)
+    
+    def on_watermark_prefix_changed(self, prefix):
+        """处理水印前缀文本变化"""
+        # 更新预览文本
+        preview_text = prefix + "2025.0101.0000" if prefix else "2025.0101.0000"
+        self.watermark_preview.set_watermark_text(preview_text)
+    
+    def on_pos_x_changed(self, value):
+        """处理X轴微调值变化"""
+        # 更新预览控件
+        self.watermark_preview.set_watermark_offset(value, self.spin_pos_y.value())
+        
+        # 保存设置
+        self.user_settings.set_setting("watermark_pos_x", value)
+    
+    def on_pos_y_changed(self, value):
+        """处理Y轴微调值变化"""
+        # 更新预览控件
+        self.watermark_preview.set_watermark_offset(self.spin_pos_x.value(), value)
+        
+        # 保存设置
+        self.user_settings.set_setting("watermark_pos_y", value)
+    
+    def on_preview_position_changed(self, x, y):
+        """处理预览控件中拖动位置变化"""
+        # 更新微调输入框，但不触发它们的valueChanged信号
+        self.spin_pos_x.blockSignals(True)
+        self.spin_pos_y.blockSignals(True)
+        self.spin_pos_x.setValue(x)
+        self.spin_pos_y.setValue(y)
+        self.spin_pos_x.blockSignals(False)
+        self.spin_pos_y.blockSignals(False)
+        
+        # 保存设置
+        self.user_settings.set_setting("watermark_pos_x", x)
+        self.user_settings.set_setting("watermark_pos_y", y)
+    
+    def on_reset_watermark_position(self):
+        """重置水印位置"""
+        # 重置微调值
+        self.spin_pos_x.setValue(0)
+        self.spin_pos_y.setValue(0)
+        
+        # 重置预览控件
+        self.watermark_preview.set_watermark_offset(0, 0)
+    
+    def _update_watermark_preview(self):
+        """更新水印预览控件，应用当前设置"""
+        try:
+            # 检查预览控件是否已创建
+            if not hasattr(self, "watermark_preview") or not self.watermark_preview:
+                logger.warning("水印预览控件未初始化，跳过更新")
+                return
+                
+            watermark_position = self.combo_watermark_position.currentText()
+            watermark_pos_x = self.spin_pos_x.value()
+            watermark_pos_y = self.spin_pos_y.value()
+            watermark_size = self.spin_watermark_size.value()
+            watermark_prefix = self.edit_watermark_prefix.text()
+            watermark_color = self.watermark_color
+            
+            # 更新水印预览
+            self.watermark_preview.set_watermark_position(watermark_position)
+            self.watermark_preview.set_watermark_offset(watermark_pos_x, watermark_pos_y)
+            self.watermark_preview.set_watermark_color(watermark_color)
+            self.watermark_preview.set_watermark_size(watermark_size)
+            
+            preview_text = watermark_prefix + "2025.0101.0000" if watermark_prefix else "2025.0101.0000"
+            self.watermark_preview.set_watermark_text(preview_text)
+        except Exception as e:
+            logger.error(f"更新水印预览控件时出错: {str(e)}")
+            # 不要让预览功能的错误影响整个程序
+            # 只记录错误但继续运行
+
+class WatermarkPreview(QFrame):
+    """水印位置预览控件，允许用户通过拖动调整水印位置"""
+    
+    # 自定义信号，当位置变化时发出
+    positionChanged = pyqtSignal(int, int)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # 设置固定尺寸，这是预览框的尺寸
+        self.setFixedSize(180, 320)  # 竖屏预览，模拟16:9的视频
+        
+        # 设置边框
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setFrameShadow(QFrame.Sunken)
+        
+        # 水印位置相关属性
+        self.watermark_position = "右上角"  # 预设位置
+        self.watermark_pos_x = 0  # X轴微调值
+        self.watermark_pos_y = 0  # Y轴微调值
+        self.watermark_text = "预览文字"  # 模拟水印文字
+        self.watermark_color = "#FFFFFF"  # 水印颜色，默认白色
+        self.watermark_size = 24  # 水印字体大小
+        
+        # 拖动相关属性
+        self.dragging = False
+        self.drag_start_pos = QPoint()
+        self.drag_current_pos = QPoint()
+        
+        # 启用鼠标追踪，以便我们可以随时获取鼠标位置
+        self.setMouseTracking(True)
+    
+    def set_watermark_position(self, position):
+        """设置水印预设位置"""
+        self.watermark_position = position
+        self._update_watermark_position()
+        self.update()  # 重绘界面
+    
+    def set_watermark_offset(self, x, y):
+        """设置水印位置的微调值"""
+        self.watermark_pos_x = x
+        self.watermark_pos_y = y
+        self.update()  # 重绘界面
+    
+    def set_watermark_color(self, color):
+        """设置水印颜色"""
+        self.watermark_color = color
+        self.update()  # 重绘界面
+    
+    def set_watermark_size(self, size):
+        """设置水印字体大小"""
+        self.watermark_size = size
+        self.update()  # 重绘界面
+    
+    def set_watermark_text(self, text):
+        """设置水印文本"""
+        self.watermark_text = text if text else "预览文字"
+        self.update()  # 重绘界面
+    
+    def _calculate_watermark_rect(self):
+        """计算水印文本框的位置和大小"""
+        # 获取控件大小
+        width = self.width()
+        height = self.height()
+        
+        # 计算水印文本的大小（这是简化计算，实际应该根据字体大小和文本长度计算）
+        font_size = max(10, min(self.watermark_size / 3, 20))  # 缩放字体大小以适应预览
+        text_width = len(self.watermark_text) * font_size * 0.65
+        text_height = font_size * 1.2
+        
+        # 根据预设位置计算基础坐标
+        if self.watermark_position == "右上角":
+            x = width - text_width - 10
+            y = 10
+        elif self.watermark_position == "左上角":
+            x = 10
+            y = 10
+        elif self.watermark_position == "右下角":
+            x = width - text_width - 10
+            y = height - text_height - 10
+        elif self.watermark_position == "左下角":
+            x = 10
+            y = height - text_height - 10
+        elif self.watermark_position == "中心":
+            x = (width - text_width) / 2
+            y = (height - text_height) / 2
+        else:
+            x = width - text_width - 10  # 默认右上角
+            y = 10
+        
+        # 应用微调偏移
+        x_scale = width / 1080  # 假设原始视频是1080宽（竖屏）
+        y_scale = height / 1920  # 假设原始视频是1920高（竖屏）
+        
+        x += self.watermark_pos_x * x_scale
+        y += self.watermark_pos_y * y_scale
+        
+        # 创建并返回文本框矩形
+        return QRect(int(x), int(y), int(text_width), int(text_height))
+    
+    def _update_watermark_position(self):
+        """根据拖动位置更新水印的微调坐标"""
+        if not self.dragging:
+            return
+        
+        # 获取当前文本框位置
+        text_rect = self._calculate_watermark_rect()
+        
+        # 计算拖动造成的偏移
+        dx = self.drag_current_pos.x() - self.drag_start_pos.x()
+        dy = self.drag_current_pos.y() - self.drag_start_pos.y()
+        
+        # 重新计算微调值
+        width = self.width()
+        height = self.height()
+        x_scale = 1080 / width  # 从预览尺寸转换回实际视频尺寸
+        y_scale = 1920 / height
+        
+        # 计算基于拖拽的新微调值
+        new_pos_x = int(self.watermark_pos_x + dx * x_scale)
+        new_pos_y = int(self.watermark_pos_y + dy * y_scale)
+        
+        # 限制范围（可选，防止水印被拖出视频边界太远）
+        new_pos_x = max(-100, min(new_pos_x, 100))
+        new_pos_y = max(-100, min(new_pos_y, 100))
+        
+        # 发出位置变化信号
+        if new_pos_x != self.watermark_pos_x or new_pos_y != self.watermark_pos_y:
+            self.watermark_pos_x = new_pos_x
+            self.watermark_pos_y = new_pos_y
+            self.positionChanged.emit(new_pos_x, new_pos_y)
+    
+    def paintEvent(self, event):
+        """绘制预览界面"""
+        super().paintEvent(event)
+        
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 绘制背景（模拟视频画面的背景）
+        painter.fillRect(self.rect(), QColor("#101010"))
+        
+        # 获取水印颜色的反色作为对比色
+        watermark_qcolor = QColor(self.watermark_color)
+        contrast_color = QColor(255 - watermark_qcolor.red(), 
+                               255 - watermark_qcolor.green(), 
+                               255 - watermark_qcolor.blue())
+        
+        # 计算水印文本框
+        text_rect = self._calculate_watermark_rect()
+        
+        # 绘制水印文本
+        font = painter.font()
+        font.setPointSize(max(8, min(self.watermark_size / 3, 16)))  # 缩放字体大小以适应预览
+        painter.setFont(font)
+        painter.setPen(QColor(self.watermark_color))
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self.watermark_text)
+        
+        # 如果正在拖动，绘制边框指示
+        if self.dragging:
+            pen = QPen(contrast_color, 1, Qt.DashLine)
+            painter.setPen(pen)
+            painter.drawRect(text_rect)
+    
+    def mousePressEvent(self, event: QMouseEvent):
+        """鼠标按下事件"""
+        if event.button() == Qt.LeftButton:
+            # 检查是否点击在文本框内
+            text_rect = self._calculate_watermark_rect()
+            if text_rect.contains(event.pos()):
+                self.dragging = True
+                self.drag_start_pos = event.pos()
+                self.drag_current_pos = event.pos()
+    
+    def mouseMoveEvent(self, event: QMouseEvent):
+        """鼠标移动事件"""
+        if self.dragging:
+            self.drag_current_pos = event.pos()
+            self._update_watermark_position()
+            self.update()  # 重绘界面
+    
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        """鼠标释放事件"""
+        if event.button() == Qt.LeftButton and self.dragging:
+            self.dragging = False
+            self.drag_current_pos = event.pos()
+            self._update_watermark_position()
+            self.update()  # 重绘界面
