@@ -80,8 +80,14 @@ class BatchWindow(QMainWindow):
         if not saved_tabs:
             return
         
+        logger.info(f"开始加载 {len(saved_tabs)} 个保存的模板标签页")
+        
+        # 确保按照之前保存的索引加载标签页
         for tab_info in saved_tabs:
             try:
+                tab_name = tab_info.get("name", "")
+                tab_index = tab_info.get("tab_index", -1)
+                logger.info(f"加载模板: {tab_name}, 索引: {tab_index}")
                 self._add_template_from_info(tab_info)
             except Exception as e:
                 logger.error(f"加载模板 {tab_info.get('name', '未知')} 时出错: {str(e)}")
@@ -89,17 +95,30 @@ class BatchWindow(QMainWindow):
         # 更新任务表格
         self._update_tasks_table()
         
+        # 为所有标签页重新设置正确的索引
+        for i, tab in enumerate(self.tabs):
+            tab["tab_index"] = i
+        
+        # 最后再保存一次以确保索引正确
+        self._save_template_state()
+        
+        logger.info(f"已完成 {len(self.tabs)} 个模板标签页的加载")
+        
     def _add_template_from_info(self, tab_info):
         """从保存的信息中添加模板标签页"""
         name = tab_info.get("name", "")
         file_path = tab_info.get("file_path", "")
         folder_path = tab_info.get("folder_path", "")
+        tab_index = tab_info.get("tab_index", -1)  # 获取标签页索引
+        instance_id = tab_info.get("instance_id", f"tab_restored_{time.time()}_{tab_index}")  # 获取实例ID或生成新ID
         
         if not name:
             return False
         
-        # 创建新的MainWindow实例
-        main_window = MainWindow()
+        logger.info(f"正在添加模板: {name}, 文件路径: {file_path}, 文件夹: {folder_path}, 实例ID: {instance_id}")
+        
+        # 创建新的MainWindow实例，使用保存的实例ID或新生成的ID
+        main_window = MainWindow(instance_id=instance_id)
         
         # 保存原始的on_compose_completed方法
         original_completed_func = main_window.on_compose_completed
@@ -144,24 +163,13 @@ class BatchWindow(QMainWindow):
         # 覆盖方法
         main_window.on_compose_completed = batch_on_completed
         
-        # 如果有配置文件路径，尝试加载
-        if file_path and os.path.exists(file_path):
-            try:
-                main_window.load_config(file_path)
-                logger.info(f"已加载模板配置文件: {file_path}")
-            except Exception as e:
-                logger.error(f"加载模板配置文件失败: {str(e)}")
+        # 确保这个标签页拥有自己独立的用户设置
+        if hasattr(main_window, "user_settings") and main_window.user_settings:
+            # 使用保存的实例ID
+            main_window.user_settings.instance_id = instance_id
+            logger.debug(f"为模板 {name} 设置独立的用户设置实例ID: {instance_id}")
         
-        # 如果有文件夹路径，尝试设置
-        if folder_path and os.path.exists(folder_path):
-            try:
-                main_window.input_folder_path.setText(folder_path)
-                main_window.on_select_folder()
-                logger.info(f"已设置模板输入文件夹: {folder_path}")
-            except Exception as e:
-                logger.error(f"设置模板输入文件夹失败: {str(e)}")
-        
-        # 添加标签页
+        # 添加标签页到界面
         tab_index = self.tab_widget.addTab(main_window, name)
         
         # 记录标签页信息
@@ -171,12 +179,49 @@ class BatchWindow(QMainWindow):
             "status": "准备就绪",
             "last_process_time": None,
             "file_path": file_path,
-            "folder_path": folder_path
+            "folder_path": folder_path,
+            "tab_index": tab_index,  # 保存标签页索引
+            "instance_id": instance_id  # 保存实例ID
         }
         
+        # 将标签页添加到标签列表
         self.tabs.append(tab_info)
         
-        logger.info(f"已添加模板标签页: {name}")
+        # 注意：文件夹路径需要在加载配置文件之后设置，以避免被覆盖
+        # 如果有配置文件路径，尝试加载
+        if file_path and os.path.exists(file_path):
+            try:
+                main_window.load_config(file_path)
+                logger.info(f"已加载模板配置文件: {file_path}")
+            except Exception as e:
+                logger.error(f"加载模板配置文件失败: {str(e)}")
+        
+        # 如果有文件夹路径，尝试设置 - 这一步要确保在最后进行，避免被其他设置覆盖
+        if folder_path and os.path.exists(folder_path):
+            try:
+                # 设置输入文件夹路径
+                main_window.input_folder_path.setText(folder_path)
+                
+                # 设置用户设置中的import_folder，确保独立性
+                if hasattr(main_window, "user_settings"):
+                    main_window.user_settings.set_setting("import_folder", folder_path)
+                
+                # 触发选择文件夹动作，以加载文件列表
+                main_window.on_select_folder()
+                
+                # 再次确认文件夹路径已正确设置
+                current_path = main_window.input_folder_path.text().strip()
+                if current_path != folder_path:
+                    logger.warning(f"文件夹路径设置可能不正确，期望: {folder_path}, 实际: {current_path}")
+                    # 再次尝试设置
+                    main_window.input_folder_path.setText(folder_path)
+                
+                logger.info(f"已设置模板输入文件夹: {folder_path}")
+            except Exception as e:
+                logger.error(f"设置模板输入文件夹失败: {str(e)}")
+                logger.error(traceback.format_exc())
+        
+        logger.info(f"已添加模板标签页: {name}, 索引: {tab_index}, 实例ID: {instance_id}")
         return True
         
     def _init_ui(self):
@@ -339,8 +384,12 @@ class BatchWindow(QMainWindow):
     
     def _add_new_tab(self):
         """添加新的标签页"""
-        # 创建新的MainWindow实例
-        main_window = MainWindow()
+        # 创建唯一的实例ID
+        instance_id = f"tab_new_{time.time()}"
+        logger.info(f"创建新标签页, 实例ID: {instance_id}")
+        
+        # 创建新的MainWindow实例，传入实例ID
+        main_window = MainWindow(instance_id=instance_id)
         
         # 保存原始的on_compose_completed方法
         original_completed_func = main_window.on_compose_completed
@@ -447,7 +496,9 @@ class BatchWindow(QMainWindow):
             "status": "准备就绪",
             "last_process_time": None,
             "file_path": "",
-            "folder_path": ""
+            "folder_path": "",
+            "tab_index": tab_index,  # 保存标签页索引
+            "instance_id": instance_id  # 保存实例ID
         }
         
         self.tabs.append(tab_info)
@@ -464,7 +515,7 @@ class BatchWindow(QMainWindow):
                 if checkbox:
                     checkbox.setChecked(True)
         
-        logger.info(f"已添加新模板标签页: {tab_name}")
+        logger.info(f"已添加新模板标签页: {tab_name}, 实例ID: {instance_id}")
         
         # 自动保存当前模板状态
         self._save_template_state()
@@ -500,13 +551,18 @@ class BatchWindow(QMainWindow):
             # 关闭标签页
             self.tab_widget.removeTab(index)
             
+            # 更新所有标签页的索引
+            for i, tab in enumerate(self.tabs):
+                tab["tab_index"] = i
+                logger.debug(f"更新标签页索引: {tab['name']} -> {i}")
+            
             # 更新任务表格
             self._update_tasks_table()
             
             # 保存当前模板状态
             self._save_template_state()
             
-            logger.info(f"关闭了标签页: {tab_name}")
+            logger.info(f"关闭了标签页: {tab_name}, 更新了所有标签页索引")
     
     def _update_tasks_table(self):
         """更新任务表格"""
@@ -1221,7 +1277,7 @@ class BatchWindow(QMainWindow):
         """保存当前模板状态"""
         try:
             # 收集各标签页的文件路径和文件夹路径信息
-            for tab in self.tabs:
+            for i, tab in enumerate(self.tabs):
                 if "window" in tab and tab["window"]:
                     window = tab["window"]
                     
@@ -1235,12 +1291,24 @@ class BatchWindow(QMainWindow):
                     if hasattr(window, "input_folder_path"):
                         folder_path = window.input_folder_path.text().strip()
                     
+                    # 获取实例ID
+                    instance_id = tab.get("instance_id", "")
+                    if not instance_id and hasattr(window, "user_settings") and hasattr(window.user_settings, "instance_id"):
+                        instance_id = window.user_settings.instance_id
+                    
                     # 更新标签页信息
                     tab["file_path"] = config_file
                     tab["folder_path"] = folder_path
+                    tab["tab_index"] = i  # 更新标签页索引，确保与当前显示顺序一致
+                    
+                    # 确保有实例ID
+                    if not tab.get("instance_id"):
+                        tab["instance_id"] = instance_id or f"tab_saved_{i}_{time.time()}"
+                    
+                    logger.debug(f"保存模板状态: {tab['name']}, 索引: {i}, 文件夹: {folder_path}, 实例ID: {tab.get('instance_id', '')}")
             
             # 保存到配置文件
             self.template_state.save_template_tabs(self.tabs)
-            logger.info("已保存当前模板状态")
+            logger.info(f"已保存 {len(self.tabs)} 个模板状态")
         except Exception as e:
             logger.error(f"保存模板状态时出错: {str(e)}") 

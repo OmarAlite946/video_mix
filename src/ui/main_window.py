@@ -41,7 +41,7 @@ logger = get_logger()
 class MainWindow(QMainWindow):
     """应用程序主窗口"""
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, instance_id=None):
         super().__init__(parent)
         self.setWindowTitle("短视频批量混剪工具")
         self.resize(1200, 800)
@@ -58,8 +58,8 @@ class MainWindow(QMainWindow):
         # 初始化缓存配置
         self.cache_config = CacheConfig()
         
-        # 初始化用户设置
-        self.user_settings = UserSettings()
+        # 初始化用户设置 - 使用传入的instance_id
+        self.user_settings = UserSettings(instance_id)
         
         # 初始化界面
         self._init_ui()
