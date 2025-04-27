@@ -546,23 +546,23 @@ class BatchWindow(QMainWindow):
         
         if reply == QMessageBox.Yes:
             # 从列表中移除
-            self.tabs.pop(index)
+            closed_tab = self.tabs.pop(index)
+            logger.info(f"关闭标签页: {closed_tab['name']}, 索引: {index}")
             
             # 关闭标签页
             self.tab_widget.removeTab(index)
             
             # 更新所有标签页的索引
             for i, tab in enumerate(self.tabs):
+                old_index = tab.get("tab_index", -1)
                 tab["tab_index"] = i
-                logger.debug(f"更新标签页索引: {tab['name']} -> {i}")
+                logger.debug(f"更新标签页索引: {tab['name']} - 从 {old_index} 到 {i}")
             
             # 更新任务表格
             self._update_tasks_table()
             
             # 保存当前模板状态
             self._save_template_state()
-            
-            logger.info(f"关闭了标签页: {tab_name}, 更新了所有标签页索引")
     
     def _update_tasks_table(self):
         """更新任务表格"""
@@ -577,6 +577,10 @@ class BatchWindow(QMainWindow):
             checkbox_layout.addWidget(checkbox)
             checkbox_layout.setAlignment(Qt.AlignCenter)
             checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # 保存tab_index到复选框的属性中，以便在选择时正确对应
+            checkbox.setProperty("tab_index", row)
+            
             self.tasks_table.setCellWidget(row, 0, checkbox_container)
             
             # 模板名称
@@ -667,15 +671,22 @@ class BatchWindow(QMainWindow):
         """开始批量处理"""
         # 检查是否有选中的任务
         selected_tasks = []
+        selected_indexes = []  # 存储实际tab索引
         
         for row in range(self.tasks_table.rowCount()):
             checkbox_container = self.tasks_table.cellWidget(row, 0)
             if checkbox_container:
                 checkbox = checkbox_container.findChild(QCheckBox)
                 if checkbox and checkbox.isChecked():
-                    selected_tasks.append(row)
+                    # 使用存储在复选框属性中的tab_index
+                    tab_index = checkbox.property("tab_index")
+                    if tab_index is not None:
+                        selected_indexes.append(tab_index)
+                    else:
+                        # 兼容旧版本，直接使用行索引
+                        selected_indexes.append(row)
         
-        if not selected_tasks:
+        if not selected_indexes:
             QMessageBox.warning(self, "批量处理", "请至少选择一个模板进行处理")
             return
         
@@ -683,7 +694,7 @@ class BatchWindow(QMainWindow):
         reply = QMessageBox.question(
             self, 
             "批量处理", 
-            f"即将开始处理 {len(selected_tasks)} 个模板，是否继续？",
+            f"即将开始处理 {len(selected_indexes)} 个模板，是否继续？",
             QMessageBox.Yes | QMessageBox.No, 
             QMessageBox.Yes
         )
@@ -701,15 +712,16 @@ class BatchWindow(QMainWindow):
             self.total_process_time = 0
             
             # 清空处理队列并重新添加选中的任务
-            self.processing_queue = selected_tasks.copy()
+            self.processing_queue = selected_indexes.copy()
             
             # 更新界面状态
-            for idx in selected_tasks:
-                self.tabs[idx]["status"] = "等待中"
-                # 重置各个任务的处理统计
-                self.tabs[idx]["process_count"] = 0
-                self.tabs[idx]["process_time"] = 0
-                self.tabs[idx]["start_time"] = None
+            for idx in selected_indexes:
+                if 0 <= idx < len(self.tabs):
+                    self.tabs[idx]["status"] = "等待中"
+                    # 重置各个任务的处理统计
+                    self.tabs[idx]["process_count"] = 0
+                    self.tabs[idx]["process_time"] = 0
+                    self.tabs[idx]["start_time"] = None
             
             self._update_tasks_table()
             
@@ -719,7 +731,7 @@ class BatchWindow(QMainWindow):
             self.btn_stop_batch.setEnabled(True)
             
             # 更新队列状态
-            self.label_queue.setText(f"队列: 0/{len(selected_tasks)}")
+            self.label_queue.setText(f"队列: 0/{len(selected_indexes)}")
             
             # 批处理模式下启用对话框过滤
             logger.info("启用批处理模式对话框过滤")
@@ -729,6 +741,9 @@ class BatchWindow(QMainWindow):
             
             # 使用定时器延迟开始处理，给UI一些响应时间
             QTimer.singleShot(500, self._process_next_task)
+            
+            # 记录详细日志，以便排查问题
+            logger.info(f"将处理以下标签页索引: {selected_indexes}")
     
     def _on_stop_batch(self):
         """停止批量处理"""
@@ -767,6 +782,7 @@ class BatchWindow(QMainWindow):
                             logger.error(f"停止处理时出错: {str(e)}")
             
             # 清空队列
+            previous_queue = self.processing_queue.copy() if self.processing_queue else []
             self.processing_queue = []
             
             # 更新界面状态
@@ -781,6 +797,10 @@ class BatchWindow(QMainWindow):
                 if tab["status"] in ["处理中", "等待中"]:
                     tab["status"] = "已停止"
                     
+            # 记录日志
+            if previous_queue:
+                logger.info(f"停止了以下任务索引的处理: {previous_queue}")
+                
             # 更新任务表格
             self._update_tasks_table()
             
@@ -791,11 +811,13 @@ class BatchWindow(QMainWindow):
         """重置批处理界面状态"""
         logger.info("重置批处理界面状态")
         
-        # 清空处理队列
+        # 备份并清空处理队列
+        original_queue = list(self.processing_queue) if self.processing_queue else []
         self.processing_queue = []
         
         # 重置状态变量
         self.is_processing = False
+        current_tab = self.current_processing_tab  # 保存以便记录
         self.current_processing_tab = None
         
         # 更新UI元素
@@ -805,12 +827,13 @@ class BatchWindow(QMainWindow):
         self.statusBar.showMessage("批量处理已停止", 3000)
         
         # 如果不是处理完成后调用的重置，那么也重置统计信息
-        if not self.processing_queue and len(self.tabs) > 0 and not any(tab["status"] == "完成" for tab in self.tabs):
+        if original_queue and len(self.tabs) > 0 and not any(tab["status"] == "完成" for tab in self.tabs):
             self.total_processed_count = 0
             self.total_process_time = 0
             self.batch_start_time = None
             self.label_total_videos.setText("总视频数: 0")
             self.label_total_time.setText("总用时: -")
+            logger.info(f"重置统计信息，有 {len(original_queue)} 个任务未处理")
         
         # 尝试释放所有标签页的资源
         for tab in self.tabs:
@@ -837,6 +860,12 @@ class BatchWindow(QMainWindow):
         
         # 执行垃圾回收
         gc.collect()
+        
+        # 记录详细日志
+        if current_tab is not None:
+            logger.info(f"重置批处理模式，之前处理的标签页索引: {current_tab}")
+        if original_queue:
+            logger.info(f"处理队列已清空，原队列包含: {original_queue}")
         
         logger.info("批处理模式已重置")
     
@@ -896,9 +925,15 @@ class BatchWindow(QMainWindow):
         tab["status"] = "处理中"
         self._update_tasks_table()
         
-        # 更新队列状态
-        total_selected_tasks = sum(1 for tab in self.tabs if tab["status"] in ["处理中", "等待中", "完成"])
-        completed_tasks = sum(1 for tab in self.tabs if tab["status"] == "完成")
+        # 更新队列状态 - 只计算被选中的任务（状态为处理中、等待中或完成的）
+        selected_tasks = []
+        for idx, t in enumerate(self.tabs):
+            if t["status"] in ["处理中", "等待中", "完成"]:
+                selected_tasks.append(idx)
+        
+        total_selected_tasks = len(selected_tasks)
+        completed_tasks = sum(1 for t in self.tabs if t["status"] == "完成")
+        
         self.label_queue.setText(f"队列: {completed_tasks}/{total_selected_tasks}")
         
         # 更新当前任务标签
@@ -914,9 +949,10 @@ class BatchWindow(QMainWindow):
             QTimer.singleShot(100, self._process_next_task)
             return
         
-        # 更新进度条
-        progress_percentage = (completed_tasks / total_selected_tasks) * 100
-        self.batch_progress.setValue(int(progress_percentage))
+        # 更新进度条 - 使用实际完成比例
+        if total_selected_tasks > 0:
+            progress_percentage = (completed_tasks / total_selected_tasks) * 100
+            self.batch_progress.setValue(int(progress_percentage))
         
         # 显示当前处理的任务信息
         self.statusBar.showMessage(f"正在处理: {tab['name']}")
@@ -992,11 +1028,19 @@ class BatchWindow(QMainWindow):
                         self.current_processing_tab = None
                         
                         # 更新进度信息
-                        total_selected_tasks = sum(1 for tab in self.tabs if tab["status"] in ["处理中", "等待中", "完成"])
-                        completed_tasks = sum(1 for tab in self.tabs if tab["status"] == "完成")
+                        selected_tasks = []
+                        for idx, t in enumerate(self.tabs):
+                            if t["status"] in ["处理中", "等待中", "完成"]:
+                                selected_tasks.append(idx)
+                        
+                        total_selected_tasks = len(selected_tasks)
+                        completed_tasks = sum(1 for t in self.tabs if t["status"] == "完成")
+                        
                         self.label_queue.setText(f"队列: {completed_tasks}/{total_selected_tasks}")
-                        progress_percentage = (completed_tasks / total_selected_tasks) * 100
-                        self.batch_progress.setValue(int(progress_percentage))
+                        
+                        if total_selected_tasks > 0:
+                            progress_percentage = (completed_tasks / total_selected_tasks) * 100
+                            self.batch_progress.setValue(int(progress_percentage))
                         
                         # 确保资源被清理
                         try:
@@ -1144,6 +1188,7 @@ class BatchWindow(QMainWindow):
         """更新任务状态（由工作线程调用，保证在UI线程执行）"""
         try:
             if 0 <= tab_idx < len(self.tabs):
+                old_status = self.tabs[tab_idx].get("status", "")
                 self.tabs[tab_idx]["status"] = status
                 
                 # 如果是完成状态，更新最后处理时间
@@ -1155,11 +1200,19 @@ class BatchWindow(QMainWindow):
                     self._save_template_state()
                 
                 self._update_tasks_table()
-                logger.info(f"任务 '{self.tabs[tab_idx]['name']}' 状态更新为: {status}")
+                logger.info(f"任务 '{self.tabs[tab_idx]['name']}' 状态更新为: {status} (之前: {old_status})")
+                
+                # 如果是在批处理过程中，并且状态变为"失败"，需要处理队列
+                if self.is_processing and status == "失败" and self.current_processing_tab == tab_idx:
+                    logger.info(f"任务 '{self.tabs[tab_idx]['name']}' 失败，准备处理下一个任务")
+                    self.current_processing_tab = None
+                    # 使用短延迟再处理下一个任务，以确保UI有时间更新
+                    QTimer.singleShot(500, self._process_next_task)
             else:
                 logger.warning(f"无效的标签索引: {tab_idx}")
         except Exception as e:
             logger.error(f"更新任务状态时出错: {str(e)}")
+            logger.error(traceback.format_exc())
     
     def _setup_dialog_filter(self):
         """设置全局对话框过滤器，用于在批处理模式下抑制对话框"""
