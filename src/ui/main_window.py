@@ -263,12 +263,6 @@ class MainWindow(QMainWindow):
         
         settings_layout.addRow(mode_layout)
         
-        # 添加其他选项卡
-        self.tabs.addTab(QWidget(), "字幕院线")
-        self.tabs.addTab(QWidget(), "导出院线")
-        self.tabs.addTab(QWidget(), "识别配音")
-        self.tabs.addTab(QWidget(), "视频分割")
-        
         # 分辨率设置
         resolution_layout = QHBoxLayout()
         self.combo_resolution = QComboBox()
@@ -438,98 +432,85 @@ class MainWindow(QMainWindow):
         watermark_group = QGroupBox("水印设置")
         watermark_layout = QVBoxLayout(watermark_group)
         
-        # 启用水印选项
-        enable_watermark_layout = QHBoxLayout()
-        self.chk_enable_watermark = QCheckBox("启用时间戳水印")
-        self.chk_enable_watermark.setChecked(False)
-        enable_watermark_layout.addWidget(self.chk_enable_watermark)
+        # 创建一个水平布局，将所有水印设置平铺在一行
+        watermark_controls_layout = QHBoxLayout()
         
-        # 添加水印帮助按钮
-        HelpSystem.add_help_button(enable_watermark_layout, "watermark")
-        enable_watermark_layout.addStretch()
-        watermark_layout.addLayout(enable_watermark_layout)
-        
-        # 水印自定义文字
-        watermark_text_layout = QHBoxLayout()
-        self.edit_watermark_prefix = QLineEdit()
-        self.edit_watermark_prefix.setPlaceholderText("自定义文字（可选）")
-        watermark_text_layout.addWidget(QLabel("自定义前缀:"))
-        watermark_text_layout.addWidget(self.edit_watermark_prefix)
-        watermark_layout.addLayout(watermark_text_layout)
-        
-        # 水印字体大小
-        font_size_layout = QHBoxLayout()
+        # 字体大小
         self.spin_watermark_size = QSpinBox()
         self.spin_watermark_size.setRange(10, 100)
         self.spin_watermark_size.setValue(24)
         self.spin_watermark_size.setSuffix(" px")
-        font_size_layout.addWidget(QLabel("字体大小:"))
-        font_size_layout.addWidget(self.spin_watermark_size)
-        font_size_layout.addStretch()
-        watermark_layout.addLayout(font_size_layout)
+        size_layout = QVBoxLayout()
+        size_layout.addWidget(QLabel("字体大小:"))
+        size_layout.addWidget(self.spin_watermark_size)
+        watermark_controls_layout.addLayout(size_layout)
         
-        # 水印字体颜色
-        font_color_layout = QHBoxLayout()
+        # 字体颜色
         self.combo_watermark_color = QComboBox()
         self.combo_watermark_color.addItems(["白色", "黑色", "红色", "绿色", "蓝色", "黄色"])
-        self.btn_custom_color = QPushButton("自定义颜色")
         self.watermark_color = "#FFFFFF"  # 默认白色
-        font_color_layout.addWidget(QLabel("字体颜色:"))
-        font_color_layout.addWidget(self.combo_watermark_color)
-        font_color_layout.addWidget(self.btn_custom_color)
-        font_color_layout.addStretch()
-        watermark_layout.addLayout(font_color_layout)
+        color_layout = QVBoxLayout()
+        color_layout.addWidget(QLabel("字体颜色:"))
+        
+        color_buttons_layout = QHBoxLayout()
+        color_buttons_layout.addWidget(self.combo_watermark_color)
+        
+        self.btn_custom_color = QPushButton("自定义")
+        self.btn_custom_color.setMaximumWidth(60)
+        color_buttons_layout.addWidget(self.btn_custom_color)
+        
+        color_layout.addLayout(color_buttons_layout)
+        watermark_controls_layout.addLayout(color_layout)
         
         # 水印位置
-        position_layout = QHBoxLayout()
         self.combo_watermark_position = QComboBox()
         self.combo_watermark_position.addItems(["右上角", "左上角", "右下角", "左下角", "中心"])
+        position_layout = QVBoxLayout()
         position_layout.addWidget(QLabel("水印位置:"))
         position_layout.addWidget(self.combo_watermark_position)
+        watermark_controls_layout.addLayout(position_layout)
         
-        # 添加一个预览按钮，替代原来直接在主界面的预览控件
-        self.btn_preview_watermark = QPushButton("预览并调整")
-        self.btn_preview_watermark.setToolTip("打开水印位置预览和调整窗口")
-        position_layout.addWidget(self.btn_preview_watermark)
+        # 位置微调
+        adjust_layout = QVBoxLayout()
+        adjust_layout.addWidget(QLabel("位置微调:"))
         
-        position_layout.addStretch()
-        watermark_layout.addLayout(position_layout)
-        
-        # 自定义位置微调（简化版，只显示当前值，不占用太多空间）
-        position_adjust_layout = QHBoxLayout()
+        adjust_spinners_layout = QHBoxLayout()
         
         # X轴微调
         self.spin_pos_x = QSpinBox()
         self.spin_pos_x.setRange(-100, 100)
         self.spin_pos_x.setValue(0)
         self.spin_pos_x.setSuffix(" px")
+        self.spin_pos_x.setMaximumWidth(70)
         
         # Y轴微调
         self.spin_pos_y = QSpinBox()
         self.spin_pos_y.setRange(-100, 100)
         self.spin_pos_y.setValue(0)
         self.spin_pos_y.setSuffix(" px")
+        self.spin_pos_y.setMaximumWidth(70)
         
-        position_adjust_layout.addWidget(QLabel("微调: X"))
-        position_adjust_layout.addWidget(self.spin_pos_x)
-        position_adjust_layout.addWidget(QLabel("Y"))
-        position_adjust_layout.addWidget(self.spin_pos_y)
-        position_adjust_layout.addStretch()
+        adjust_spinners_layout.addWidget(QLabel("X:"))
+        adjust_spinners_layout.addWidget(self.spin_pos_x)
+        adjust_spinners_layout.addWidget(QLabel("Y:"))
+        adjust_spinners_layout.addWidget(self.spin_pos_y)
         
-        watermark_layout.addLayout(position_adjust_layout)
+        adjust_layout.addLayout(adjust_spinners_layout)
+        watermark_controls_layout.addLayout(adjust_layout)
         
-        # 添加重置按钮
-        reset_layout = QHBoxLayout()
+        # 重置和预览按钮
+        buttons_layout = QVBoxLayout()
+        buttons_layout.addWidget(QLabel("操作:"))
+        
+        action_buttons_layout = QHBoxLayout()
+        
+        # 重置按钮
         self.reset_btn = QPushButton("重置位置")
         self.reset_btn.setToolTip("将水印位置重置到默认值")
-        reset_layout.addWidget(self.reset_btn)
-        reset_layout.addStretch()
+        action_buttons_layout.addWidget(self.reset_btn)
         
-        watermark_layout.addLayout(reset_layout)
-        
-        # 添加"预览水印效果"按钮
-        preview_btn_layout = QHBoxLayout()
-        self.btn_preview_watermark = QPushButton("预览水印效果")
+        # 预览按钮
+        self.btn_preview_watermark = QPushButton("预览效果")
         self.btn_preview_watermark.setIcon(QApplication.style().standardIcon(QStyle.SP_FileDialogContentsView))
         self.btn_preview_watermark.setToolTip("打开水印预览对话框，可视化调整水印位置")
         self.btn_preview_watermark.setStyleSheet("""
@@ -544,10 +525,31 @@ class MainWindow(QMainWindow):
                 background-color: #4A6FB8;
             }
         """)
-        preview_btn_layout.addWidget(self.btn_preview_watermark)
-        preview_btn_layout.addStretch()
+        action_buttons_layout.addWidget(self.btn_preview_watermark)
         
-        watermark_layout.addLayout(preview_btn_layout)
+        buttons_layout.addLayout(action_buttons_layout)
+        watermark_controls_layout.addLayout(buttons_layout)
+        
+        # 启用水印选项
+        enable_watermark_layout = QHBoxLayout()
+        self.chk_enable_watermark = QCheckBox("启用时间戳水印")
+        self.chk_enable_watermark.setChecked(False)
+        enable_watermark_layout.addWidget(self.chk_enable_watermark)
+        
+        # 添加水印帮助按钮
+        HelpSystem.add_help_button(enable_watermark_layout, "watermark")
+        enable_watermark_layout.addStretch()
+        watermark_layout.addLayout(enable_watermark_layout)
+        
+        watermark_layout.addLayout(watermark_controls_layout)
+        
+        # 水印自定义文字
+        watermark_text_layout = QHBoxLayout()
+        self.edit_watermark_prefix = QLineEdit()
+        self.edit_watermark_prefix.setPlaceholderText("自定义文字（可选）")
+        watermark_text_layout.addWidget(QLabel("自定义前缀:"))
+        watermark_text_layout.addWidget(self.edit_watermark_prefix)
+        watermark_layout.addLayout(watermark_text_layout)
         
         # 水印预览控件不直接创建，在需要时通过对话框显示
         self.watermark_preview = None
