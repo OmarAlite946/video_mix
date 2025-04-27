@@ -486,58 +486,71 @@ class MainWindow(QMainWindow):
         self.combo_watermark_position.addItems(["右上角", "左上角", "右下角", "左下角", "中心"])
         position_layout.addWidget(QLabel("水印位置:"))
         position_layout.addWidget(self.combo_watermark_position)
+        
+        # 添加一个预览按钮，替代原来直接在主界面的预览控件
+        self.btn_preview_watermark = QPushButton("预览并调整")
+        self.btn_preview_watermark.setToolTip("打开水印位置预览和调整窗口")
+        position_layout.addWidget(self.btn_preview_watermark)
+        
         position_layout.addStretch()
         watermark_layout.addLayout(position_layout)
         
-        # 创建水印预览与调整控件
-        preview_adjust_layout = QHBoxLayout()
-        
-        # 左侧：位置预览控件
-        self.watermark_preview = WatermarkPreview()
-        # 添加一个标签
-        preview_label = QLabel("水印位置预览（可拖拽调整）:")
-        preview_label.setAlignment(Qt.AlignCenter)
-        
-        preview_left_layout = QVBoxLayout()
-        preview_left_layout.addWidget(preview_label)
-        preview_left_layout.addWidget(self.watermark_preview, 1, Qt.AlignCenter)
-        preview_left_layout.addStretch()
-        
-        # 右侧：位置微调控件
-        position_adjust_layout = QVBoxLayout()
-        position_adjust_label = QLabel("位置微调:")
-        position_adjust_layout.addWidget(position_adjust_label)
+        # 自定义位置微调（简化版，只显示当前值，不占用太多空间）
+        position_adjust_layout = QHBoxLayout()
         
         # X轴微调
-        x_adjust_layout = QHBoxLayout()
-        x_adjust_layout.addWidget(QLabel("X:"))
         self.spin_pos_x = QSpinBox()
         self.spin_pos_x.setRange(-100, 100)
         self.spin_pos_x.setValue(0)
         self.spin_pos_x.setSuffix(" px")
-        x_adjust_layout.addWidget(self.spin_pos_x)
-        position_adjust_layout.addLayout(x_adjust_layout)
         
         # Y轴微调
-        y_adjust_layout = QHBoxLayout()
-        y_adjust_layout.addWidget(QLabel("Y:"))
         self.spin_pos_y = QSpinBox()
         self.spin_pos_y.setRange(-100, 100)
         self.spin_pos_y.setValue(0)
         self.spin_pos_y.setSuffix(" px")
-        y_adjust_layout.addWidget(self.spin_pos_y)
-        position_adjust_layout.addLayout(y_adjust_layout)
         
-        # 重置按钮
-        self.reset_btn = QPushButton("重置位置")
-        position_adjust_layout.addWidget(self.reset_btn)
+        position_adjust_layout.addWidget(QLabel("微调: X"))
+        position_adjust_layout.addWidget(self.spin_pos_x)
+        position_adjust_layout.addWidget(QLabel("Y"))
+        position_adjust_layout.addWidget(self.spin_pos_y)
         position_adjust_layout.addStretch()
         
-        # 组合预览和调整控件
-        preview_adjust_layout.addLayout(preview_left_layout)
-        preview_adjust_layout.addLayout(position_adjust_layout)
+        watermark_layout.addLayout(position_adjust_layout)
         
-        watermark_layout.addLayout(preview_adjust_layout)
+        # 添加重置按钮
+        reset_layout = QHBoxLayout()
+        self.reset_btn = QPushButton("重置位置")
+        self.reset_btn.setToolTip("将水印位置重置到默认值")
+        reset_layout.addWidget(self.reset_btn)
+        reset_layout.addStretch()
+        
+        watermark_layout.addLayout(reset_layout)
+        
+        # 添加"预览水印效果"按钮
+        preview_btn_layout = QHBoxLayout()
+        self.btn_preview_watermark = QPushButton("预览水印效果")
+        self.btn_preview_watermark.setIcon(QApplication.style().standardIcon(QStyle.SP_FileDialogContentsView))
+        self.btn_preview_watermark.setToolTip("打开水印预览对话框，可视化调整水印位置")
+        self.btn_preview_watermark.setStyleSheet("""
+            QPushButton {
+                background-color: #5C85D6;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #4A6FB8;
+            }
+        """)
+        preview_btn_layout.addWidget(self.btn_preview_watermark)
+        preview_btn_layout.addStretch()
+        
+        watermark_layout.addLayout(preview_btn_layout)
+        
+        # 水印预览控件不直接创建，在需要时通过对话框显示
+        self.watermark_preview = None
         
         # 添加水印设置到主设置布局
         settings_layout.addRow(watermark_group)
@@ -577,6 +590,55 @@ class MainWindow(QMainWindow):
         HelpSystem.add_help_button(count_layout, "generate_count")
         
         settings_layout.addRow(count_layout)
+        
+        # 音频部分
+        audio_group = QGroupBox("音频设置")
+        audio_layout = QVBoxLayout(audio_group)
+        
+        # 音量设置
+        volume_layout = QHBoxLayout()
+        self.spin_voice_volume = QDoubleSpinBox()
+        self.spin_voice_volume.setRange(0, 5)
+        self.spin_voice_volume.setValue(1.0)
+        self.spin_voice_volume.setSingleStep(0.1)
+        self.spin_voice_volume.setSuffix(" 倍")
+        
+        self.spin_bgm_volume = QDoubleSpinBox()
+        self.spin_bgm_volume.setRange(0, 5)
+        self.spin_bgm_volume.setValue(0.5)
+        self.spin_bgm_volume.setSingleStep(0.1)
+        self.spin_bgm_volume.setSuffix(" 倍")
+        
+        volume_layout.addWidget(QLabel("配音音量:"))
+        volume_layout.addWidget(self.spin_voice_volume)
+        volume_layout.addWidget(QLabel("背景音量:"))
+        volume_layout.addWidget(self.spin_bgm_volume)
+        volume_layout.addStretch()
+        
+        # 添加音量设置帮助按钮
+        HelpSystem.add_help_button(volume_layout, "volume_settings")
+        
+        audio_layout.addLayout(volume_layout)
+        
+        # 背景音乐设置
+        bgm_layout = QHBoxLayout()
+        self.edit_bgm_path = QLineEdit()
+        self.btn_browse_bgm = QPushButton("选择")
+        self.btn_play_bgm = QPushButton("播放")
+        
+        bgm_layout.addWidget(QLabel("背景音乐:"))
+        bgm_layout.addWidget(self.edit_bgm_path)
+        bgm_layout.addWidget(self.btn_browse_bgm)
+        bgm_layout.addWidget(self.btn_play_bgm)
+        bgm_layout.addStretch()
+        
+        # 添加背景音乐帮助按钮
+        HelpSystem.add_help_button(bgm_layout, "background_music")
+        
+        audio_layout.addLayout(bgm_layout)
+        
+        # 添加音频设置到主设置布局
+        settings_layout.addRow(audio_group)
     
     def _init_menubar(self):
         """初始化菜单栏"""
@@ -714,8 +776,12 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         self.spin_pos_y.valueChanged.connect(self.on_pos_y_changed)
         self.reset_btn.clicked.connect(self.on_reset_watermark_position)
         
-        # 连接水印预览控件的位置变化信号
-        self.watermark_preview.positionChanged.connect(self.on_preview_position_changed)
+        # 添加预览水印按钮的连接
+        self.btn_preview_watermark.clicked.connect(self.on_preview_watermark)
+        
+        # 连接水印预览控件的位置变化信号（如果存在）
+        if hasattr(self, "watermark_preview") and self.watermark_preview is not None:
+            self.watermark_preview.positionChanged.connect(self.on_preview_position_changed)
         
         # 缓存目录
         self.btn_browse_cache_dir.clicked.connect(self.on_browse_cache_dir)
@@ -3160,33 +3226,47 @@ FFmpeg是一个功能强大的视频处理工具，它是本软件处理视频�
         # 重置预览控件
         self.watermark_preview.set_watermark_offset(0, 0)
     
+    @pyqtSlot()
+    def on_preview_watermark(self):
+        """显示水印预览对话框"""
+        try:
+            # 创建并显示水印预览对话框
+            preview_dialog = WatermarkPreviewDialog(self)
+            result = preview_dialog.exec_()
+            
+            # 如果用户点击"确定"，应用新的设置
+            if result == QDialog.Accepted:
+                position, pos_x, pos_y = preview_dialog.get_position_values()
+                
+                # 更新UI控件（阻止信号，避免触发额外的更新）
+                self.combo_watermark_position.blockSignals(True)
+                self.spin_pos_x.blockSignals(True)
+                self.spin_pos_y.blockSignals(True)
+                
+                self.combo_watermark_position.setCurrentText(position)
+                self.spin_pos_x.setValue(pos_x)
+                self.spin_pos_y.setValue(pos_y)
+                
+                self.combo_watermark_position.blockSignals(False)
+                self.spin_pos_x.blockSignals(False)
+                self.spin_pos_y.blockSignals(False)
+                
+                # 保存设置
+                self.user_settings.set_setting("watermark_position", position)
+                self.user_settings.set_setting("watermark_pos_x", pos_x)
+                self.user_settings.set_setting("watermark_pos_y", pos_y)
+                
+                # 记录日志
+                logger.info(f"已更新水印位置: {position}, 偏移: ({pos_x}, {pos_y})")
+        except Exception as e:
+            logger.error(f"显示水印预览对话框时出错: {str(e)}")
+            QMessageBox.warning(self, "预览错误", f"无法显示水印预览: {str(e)}")
+
     def _update_watermark_preview(self):
         """更新水印预览控件，应用当前设置"""
-        try:
-            # 检查预览控件是否已创建
-            if not hasattr(self, "watermark_preview") or not self.watermark_preview:
-                logger.warning("水印预览控件未初始化，跳过更新")
-                return
-                
-            watermark_position = self.combo_watermark_position.currentText()
-            watermark_pos_x = self.spin_pos_x.value()
-            watermark_pos_y = self.spin_pos_y.value()
-            watermark_size = self.spin_watermark_size.value()
-            watermark_prefix = self.edit_watermark_prefix.text()
-            watermark_color = self.watermark_color
-            
-            # 更新水印预览
-            self.watermark_preview.set_watermark_position(watermark_position)
-            self.watermark_preview.set_watermark_offset(watermark_pos_x, watermark_pos_y)
-            self.watermark_preview.set_watermark_color(watermark_color)
-            self.watermark_preview.set_watermark_size(watermark_size)
-            
-            preview_text = watermark_prefix + "2025.0101.0000" if watermark_prefix else "2025.0101.0000"
-            self.watermark_preview.set_watermark_text(preview_text)
-        except Exception as e:
-            logger.error(f"更新水印预览控件时出错: {str(e)}")
-            # 不要让预览功能的错误影响整个程序
-            # 只记录错误但继续运行
+        # 不再需要此方法，因为我们不再直接显示预览控件
+        # 保留此方法以保持兼容性，但不执行任何操作
+        pass
 
 class WatermarkPreview(QFrame):
     """水印位置预览控件，允许用户通过拖动调整水印位置"""
@@ -3376,3 +3456,170 @@ class WatermarkPreview(QFrame):
             self.drag_current_pos = event.pos()
             self._update_watermark_position()
             self.update()  # 重绘界面
+
+class WatermarkPreviewDialog(QDialog):
+    """水印位置预览对话框，用于调整水印位置"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # 设置窗口标题和大小
+        self.setWindowTitle("水印位置预览")
+        self.resize(480, 640)
+        
+        # 保存初始参数
+        self.parent_window = parent
+        self.position = parent.combo_watermark_position.currentText() if parent else "右上角"
+        self.pos_x = parent.spin_pos_x.value() if parent else 0
+        self.pos_y = parent.spin_pos_y.value() if parent else 0
+        self.size = parent.spin_watermark_size.value() if parent else 24
+        self.prefix = parent.edit_watermark_prefix.text() if parent else ""
+        self.color = parent.watermark_color if parent else "#FFFFFF"
+        
+        # 创建布局
+        self._init_ui()
+        
+    def _init_ui(self):
+        """初始化UI"""
+        # 主布局
+        layout = QVBoxLayout(self)
+        
+        # 添加说明标签
+        info_label = QLabel("在预览中拖动水印文字调整位置，设置完成后点击确定保存")
+        info_label.setStyleSheet("color: #666666;")
+        layout.addWidget(info_label)
+        
+        # 预览控件
+        self.preview = WatermarkPreview()
+        self.preview.set_watermark_position(self.position)
+        self.preview.set_watermark_offset(self.pos_x, self.pos_y)
+        self.preview.set_watermark_color(self.color)
+        self.preview.set_watermark_size(self.size)
+        
+        # 设置预览文字
+        preview_text = self.prefix + "2025.0101.0000" if self.prefix else "2025.0101.0000"
+        self.preview.set_watermark_text(preview_text)
+        
+        # 创建设置布局
+        settings_layout = QHBoxLayout()
+        
+        # 左侧：预览显示
+        preview_layout = QVBoxLayout()
+        preview_label = QLabel("拖拽调整位置:")
+        preview_layout.addWidget(preview_label)
+        preview_layout.addWidget(self.preview, 1)
+        
+        # 右侧：设置控件
+        control_layout = QVBoxLayout()
+        
+        # 位置设置
+        pos_group = QGroupBox("位置设置")
+        pos_layout = QVBoxLayout(pos_group)
+        
+        # 预设位置
+        preset_layout = QHBoxLayout()
+        preset_label = QLabel("预设位置:")
+        self.combo_position = QComboBox()
+        self.combo_position.addItems(["右上角", "左上角", "右下角", "左下角", "中心"])
+        self.combo_position.setCurrentText(self.position)
+        preset_layout.addWidget(preset_label)
+        preset_layout.addWidget(self.combo_position)
+        pos_layout.addLayout(preset_layout)
+        
+        # X坐标微调
+        x_layout = QHBoxLayout()
+        x_label = QLabel("X坐标:")
+        self.spin_x = QSpinBox()
+        self.spin_x.setRange(-100, 100)
+        self.spin_x.setValue(self.pos_x)
+        self.spin_x.setSuffix(" px")
+        x_layout.addWidget(x_label)
+        x_layout.addWidget(self.spin_x)
+        pos_layout.addLayout(x_layout)
+        
+        # Y坐标微调
+        y_layout = QHBoxLayout()
+        y_label = QLabel("Y坐标:")
+        self.spin_y = QSpinBox()
+        self.spin_y.setRange(-100, 100)
+        self.spin_y.setValue(self.pos_y)
+        self.spin_y.setSuffix(" px")
+        y_layout.addWidget(y_label)
+        y_layout.addWidget(self.spin_y)
+        pos_layout.addLayout(y_layout)
+        
+        # 重置按钮
+        self.btn_reset = QPushButton("重置位置")
+        pos_layout.addWidget(self.btn_reset)
+        
+        # 添加分组到控制布局
+        control_layout.addWidget(pos_group)
+        control_layout.addStretch(1)
+        
+        # 组合左右两边
+        settings_layout.addLayout(preview_layout, 3)
+        settings_layout.addLayout(control_layout, 2)
+        
+        # 添加设置布局到主布局
+        layout.addLayout(settings_layout)
+        
+        # 按钮区域
+        buttons_layout = QHBoxLayout()
+        self.btn_cancel = QPushButton("取消")
+        self.btn_ok = QPushButton("确定")
+        self.btn_ok.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        
+        buttons_layout.addStretch(1)
+        buttons_layout.addWidget(self.btn_cancel)
+        buttons_layout.addWidget(self.btn_ok)
+        
+        layout.addLayout(buttons_layout)
+        
+        # 连接信号和槽
+        self.preview.positionChanged.connect(self.on_preview_position_changed)
+        self.combo_position.currentTextChanged.connect(self.on_position_changed)
+        self.spin_x.valueChanged.connect(self.on_x_changed)
+        self.spin_y.valueChanged.connect(self.on_y_changed)
+        self.btn_reset.clicked.connect(self.on_reset)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok.clicked.connect(self.accept)
+    
+    def on_preview_position_changed(self, x, y):
+        """预览控件拖动时更新设置值"""
+        self.spin_x.blockSignals(True)
+        self.spin_y.blockSignals(True)
+        self.spin_x.setValue(x)
+        self.spin_y.setValue(y)
+        self.spin_x.blockSignals(False)
+        self.spin_y.blockSignals(False)
+        self.pos_x = x
+        self.pos_y = y
+    
+    def on_position_changed(self, position):
+        """位置预设改变"""
+        self.position = position
+        self.preview.set_watermark_position(position)
+    
+    def on_x_changed(self, value):
+        """X坐标改变"""
+        self.pos_x = value
+        self.preview.set_watermark_offset(value, self.pos_y)
+    
+    def on_y_changed(self, value):
+        """Y坐标改变"""
+        self.pos_y = value
+        self.preview.set_watermark_offset(self.pos_x, value)
+    
+    def on_reset(self):
+        """重置位置"""
+        self.spin_x.setValue(0)
+        self.spin_y.setValue(0)
+        self.preview.set_watermark_offset(0, 0)
+    
+    def get_position_values(self):
+        """获取当前设置的位置值
+        
+        Returns:
+            tuple: (预设位置, x坐标, y坐标)
+        """
+        return (self.position, self.pos_x, self.pos_y)
