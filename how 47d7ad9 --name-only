@@ -1,0 +1,52 @@
+[33mcommit bf6a070e6ca605ca8d9610a66cd1326c286c3399[m[33m ([m[1;36mHEAD[m[33m)[m
+Author: OMAR <Omartiny946@gmail.com>
+Date:   Fri May 2 18:12:04 2025 +0800
+
+    记忆功能和批处理修复完成
+
+"README_\350\256\260\345\277\206\345\212\237\350\203\275\344\277\256\345\244\215\350\257\264\346\230\216.txt"
+backup/705374a_batch_window.py
+backup/batch_window.py.bak
+backup/template_state.py.bak
+backup/user_settings_1746180230.py.bak
+backup_with_memory.py
+batch_window_diff.txt
+fix_memory_functions.py
+memory_backup/README.txt
+memory_backup/batch_window_20250502_180119.py
+memory_backup/restore_memory_functions.py
+src/core/__pycache__/video_processor.cpython-311.pyc
+src/hardware/__pycache__/system_analyzer.cpython-311.pyc
+src/ui/__pycache__/batch_window.cpython-311.pyc
+src/ui/__pycache__/main_window.cpython-311.pyc
+src/utils/__pycache__/cache_config.cpython-311.pyc
+src/utils/__pycache__/file_utils.cpython-311.pyc
+src/utils/__pycache__/template_state.cpython-311.pyc
+src/utils/__pycache__/user_settings.cpython-311.pyc
+src/utils/user_settings.py
+temp/.ses
+temp/05b4879c-01cb-4ea2-af8d-732939181ab6.tmp
+temp/08527c97-0f67-40f6-98d5-582f646e2371.tmp
+temp/09374a08-1523-4c05-815b-ce639f5194e1.tmp
+temp/0b4e968a-9a51-4064-96d1-a449211e9955.tmp
+temp/37bc0c5c-fed5-4d02-a5b7-5a49b9f291ec.tmp
+temp/3ba2d886-5635-43eb-801d-7fceb8079b36.tmp
+temp/69f7107a-bafc-499e-b493-0e5f93ff831b.tmp
+temp/7288cb6b-1195-4794-94ac-2ffed25eddb1.tmp
+temp/819d655a-8aa9-4ff6-b919-c85e264adeb3.tmp
+temp/83014b85-0901-4b32-8a46-f1ab390571d3.tmp
+temp/Setup Log 2025-05-02 #001.txt
+temp/af754a88-8915-4173-97ad-dc2e3dd0ad01.tmp
+temp/cv_debug.log
+temp/d4631e86-236b-4586-8fe9-a703552be37e.tmp
+temp/db1734dc-f648-436b-965c-bea129ddf5f8.tmp
+temp/dd0fc5b0-eccc-4eb9-bec7-c7f67380c2c8.tmp
+temp/is-853NA.tmp/CodeSetup-stable-0.49.6.tmp
+temp/is-ETML4.tmp/_isetup/_setup64.tmp
+temp/kccsdkbak/bak/mdbx.dat
+temp/vscode-stable-undefined-x64-k7k0013kswd/CodeSetup-stable-0.49.6.exe
+temp/vscode-stable-undefined-x64-k7k0013kswd/CodeSetup-stable-0.49.6.flag
+"\344\277\256\345\244\215\345\267\245\345\205\267/README_\350\256\260\345\277\206\345\212\237\350\203\275\344\277\256\345\244\215\350\257\264\346\230\216.txt"
+"\344\277\256\345\244\215\345\267\245\345\205\267/backup_with_memory.py"
+"\344\277\256\345\244\215\345\267\245\345\205\267/fix_memory_functions.py"
+"\344\277\256\345\244\215\345\267\245\345\205\267/\344\275\277\347\224\250\346\214\207\345\215\227.txt"

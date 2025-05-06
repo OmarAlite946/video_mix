@@ -1,0 +1,9 @@
+moviepy==1.0.3
+numpy==1.24.3
+opencv-python==4.8.1.78
+PyQt5==5.15.9
+ffmpeg-python==0.2.0
+tqdm==4.66.1
+psutil==5.9.5
+Pillow==10.0.1
+scipy==1.11.3 

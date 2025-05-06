@@ -1,0 +1,16 @@
+{
+  "available": true,
+  "gpus": [
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 2080 with Max-Q Design",
+      "vendor": "NVIDIA",
+      "memory_total_mb": 8192,
+      "type": "dedicated"
+    }
+  ],
+  "accelerators": {},
+  "count": 1,
+  "primary_gpu": "NVIDIA GeForce RTX 2080 with Max-Q Design",
+  "primary_vendor": "NVIDIA"
+}
